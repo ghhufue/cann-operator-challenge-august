@@ -89,8 +89,6 @@ target_link_options(test_aclnn_chunk_gated_delta_rule_fwd_h PRIVATE
   "-Wl,-rpath,${CUSTOM_OP_LIB_DIR}"
   "-Wl,-rpath,${ASCEND_PATH}/lib64"
   "-Wl,-rpath,${CANN_ARCH_DIR}/lib64"
-  "-Wl,-rpath,${ASCEND_PATH}/devlib"
-  "-Wl,-rpath,${CANN_ARCH_DIR}/devlib"
 )
 
 install(TARGETS test_aclnn_chunk_gated_delta_rule_fwd_h DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})

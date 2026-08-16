@@ -20,6 +20,12 @@ echo "========================================"
 if [ -z "${ASCEND_HOME_PATH:-}" ]; then
     export ASCEND_HOME_PATH=/usr/local/Ascend/cann
 fi
+if [ -f "${ASCEND_HOME_PATH}/set_env.sh" ]; then
+    # Load the runtime/driver search paths supplied by the active CANN kit.
+    # Do not use CANN devlib here: it may contain link-time stubs that cannot
+    # initialize a real device.
+    source "${ASCEND_HOME_PATH}/set_env.sh" >/dev/null
+fi
 
 MACHINE_ARCH="$(uname -m)"
 if [ -d "${ASCEND_HOME_PATH}/${MACHINE_ARCH}-linux" ]; then
@@ -40,7 +46,17 @@ if [ ! -d "${CURRENT_VENDOR_DIR}" ]; then
 fi
 
 export ASCEND_CUSTOM_OPP_PATH="${CURRENT_VENDOR_DIR}${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-export LD_LIBRARY_PATH="${OP_BUILD_DIR}/op_host:${CURRENT_VENDOR_DIR}/op_api/lib:${ASCEND_HOME_PATH}/lib64:${CANN_ARCH_DIR}/lib64:${ASCEND_HOME_PATH}/devlib:${CANN_ARCH_DIR}/devlib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+DRIVER_LIBRARY_PATH=""
+for driver_dir in \
+    /usr/local/Ascend/driver/lib64/common \
+    /usr/local/Ascend/driver/lib64/driver \
+    /usr/local/Ascend/driver/lib64; do
+    if [ -d "${driver_dir}" ]; then
+        DRIVER_LIBRARY_PATH="${DRIVER_LIBRARY_PATH:+${DRIVER_LIBRARY_PATH}:}${driver_dir}"
+    fi
+done
+export LD_LIBRARY_PATH="${OP_BUILD_DIR}/op_host:${CURRENT_VENDOR_DIR}/op_api/lib${DRIVER_LIBRARY_PATH:+:${DRIVER_LIBRARY_PATH}}:${ASCEND_HOME_PATH}/lib64:${CANN_ARCH_DIR}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 if [ -n "${VALIDATION_CASES:-}" ]; then
     IFS=',' read -r -a CASE_NAMES <<< "${VALIDATION_CASES}"
@@ -69,6 +85,13 @@ echo "[INFO] Building ACLNN validation runner..."
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
 cmake --build "${BUILD_DIR}" --parallel "$(nproc)"
 RUNNER="${BUILD_DIR}/bin/test_aclnn_chunk_gated_delta_rule_fwd_h"
+
+MISSING_LIBRARIES="$(ldd "${RUNNER}" | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
+if [ -n "${MISSING_LIBRARIES}" ]; then
+    echo "[ERROR] Validation runner has unresolved runtime libraries: ${MISSING_LIBRARIES}"
+    echo "[ERROR] Check the CANN set_env.sh and real Ascend driver library mounts."
+    exit 1
+fi
 
 PASSED_CASES=()
 FAILED_CASES=()
