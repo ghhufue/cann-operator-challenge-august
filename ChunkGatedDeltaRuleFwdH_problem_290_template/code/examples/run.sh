@@ -74,17 +74,25 @@ if [ "${#CASE_NAMES[@]}" -eq 0 ]; then
     exit 1
 fi
 
+# Only regenerate the cases the generator knows by name (the built-in
+# CASES list). Case directories that already exist and are not in that
+# list (e.g. deterministic --stress samples) are run as-is.
+KNOWN_CASE_NAMES="$("${PYTHON_BIN}" "${GOLDEN_GENERATOR}" --list-cases | cut -d: -f1)"
 GENERATOR_ARGS=()
 for case_name in "${CASE_NAMES[@]}"; do
-    GENERATOR_ARGS+=(--case "${case_name}")
+    if grep -qx "${case_name}" <<< "${KNOWN_CASE_NAMES}"; then
+        GENERATOR_ARGS+=(--case "${case_name}")
+    fi
 done
 
 echo "[INFO] Logical NPU device: ${DEVICE_ID}"
 echo "[INFO] Current OPP: ${CURRENT_VENDOR_DIR}"
 echo "[INFO] Cases: ${CASE_NAMES[*]}"
-echo "[INFO] Generating legal inputs and Golden outputs..."
-"${PYTHON_BIN}" "${GOLDEN_GENERATOR}" \
-    --output-dir "${DATA_DIR}" "${GENERATOR_ARGS[@]}"
+if [ "${#GENERATOR_ARGS[@]}" -ne 0 ]; then
+    echo "[INFO] Generating legal inputs and Golden outputs..."
+    "${PYTHON_BIN}" "${GOLDEN_GENERATOR}" \
+        --output-dir "${DATA_DIR}" "${GENERATOR_ARGS[@]}"
+fi
 
 echo "[INFO] Building ACLNN validation runner..."
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
