@@ -1,125 +1,165 @@
-#include <iostream>
 #include <gtest/gtest.h>
-#include "tiling_context_faker.h"
-#include "tiling_case_executor.h"
+
+#include <cstdint>
+#include <vector>
+
 #include "chunk_gated_delta_rule_fwd_h_tiling_data.h"
+#include "tiling_case_executor.h"
+#include "tiling_context_faker.h"
 
 namespace ChunkGatedDeltaRuleFwdHUT {
-using namespace std;
-using namespace ge;
-using namespace gert;
-static const std::string OP_NAME = "ChunkGatedDeltaRuleFwdH";
+namespace {
 
-struct ChunkGatedDeltaRuleFwdHTestParam {
-    std::string caseName;
-    std::initializer_list<int64_t> kShape;
-    ge::DataType kDtype;
-    ge::Format kFormat;
-    std::initializer_list<int64_t> wShape;
-    ge::DataType wDtype;
-    ge::Format wFormat;
-    std::initializer_list<int64_t> uShape;
-    ge::DataType uDtype;
-    ge::Format uFormat;
-    std::initializer_list<int64_t> gShape;
-    ge::DataType gDtype;
-    ge::Format gFormat;
-    std::initializer_list<int64_t> initial_stateShape;
-    ge::DataType initial_stateDtype;
-    ge::Format initial_stateFormat;
-    std::initializer_list<int64_t> cu_seqlensShape;
-    ge::DataType cu_seqlensDtype;
-    ge::Format cu_seqlensFormat;
-    std::initializer_list<int64_t> chunk_indicesShape;
-    ge::DataType chunk_indicesDtype;
-    ge::Format chunk_indicesFormat;
-    std::initializer_list<int64_t> hShape;
-    ge::DataType hDtype;
-    ge::Format hFormat;
-    std::initializer_list<int64_t> vShape;
-    ge::DataType vDtype;
-    ge::Format vFormat;
-    std::initializer_list<int64_t> final_stateShape;
-    ge::DataType final_stateDtype;
-    ge::Format final_stateFormat;
-    std::string socVersion;
-    ge::graphStatus status;
-    uint64_t expectTilingKey;
-    std::string expectTilingData;
-    std::vector<size_t> expectWorkspaces;
-    uint64_t maxAIVNum;
-    uint64_t ubSize;
-    uint64_t tilingDataMaxSize;
-};
+using TensorDescription = gert::TilingContextPara::TensorDescription;
+using OpAttr = gert::TilingContextPara::OpAttr;
 
-// TODO: 以下期望值基于初始模板实现，修改 tiling 逻辑后请更新：
-//   expectTilingKey:  参考 op_kernel/chunk_gated_delta_rule_fwd_h_tiling_key.h 和 op_host/chunk_gated_delta_rule_fwd_h_tiling.cpp 中 tilingKey 的逻辑
-//   expectTilingData: 参考 op_host/chunk_gated_delta_rule_fwd_h_tiling.cpp 中 TilingData 各字段的赋值
-//   expectWorkspaces: 参考 op_host/chunk_gated_delta_rule_fwd_h_tiling.cpp 中 GetWorkspaceSize 的逻辑
-static ChunkGatedDeltaRuleFwdHTestParam testCases[] = {
-    {"chunk_gated_delta_rule_fwd_h_0", {1, 10016, 2, 128}, ge::DT_BF16, ge::FORMAT_ND, {1, 8, 10016, 128}, ge::DT_BF16, ge::FORMAT_ND, {1, 8, 10016, 128}, ge::DT_BF16, ge::FORMAT_ND, {1, 8, 10016}, ge::DT_FLOAT, ge::FORMAT_ND, {2, 8, 128, 128}, ge::DT_BF16, ge::FORMAT_ND, {3}, ge::DT_INT64, ge::FORMAT_ND, {158, 2}, ge::DT_INT64, ge::FORMAT_ND, {1, 8, 158, 128, 128}, ge::DT_BF16, ge::FORMAT_ND, {1, 8, 10016, 128}, ge::DT_BF16, ge::FORMAT_ND, {2, 8, 128, 128}, ge::DT_BF16, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 0UL, "0 1 0 ", {0}, 64, 262144, 4096},
-};
-
-class ChunkGatedDeltaRuleFwdHTilingTest : public testing::TestWithParam<ChunkGatedDeltaRuleFwdHTestParam> {
-protected:
-    static void SetUpTestCase() {
-        std::cout << "ChunkGatedDeltaRuleFwdHTilingTest SetUp." << std::endl;
-    }
-    static void TearDownTestCase() {
-        std::cout << "ChunkGatedDeltaRuleFwdHTilingTest TearDown." << std::endl;
-    }
-};
+constexpr const char* OP_NAME = "ChunkGatedDeltaRuleFwdH";
+constexpr uint64_t UB_SIZE = 262144;
+constexpr uint64_t TILING_DATA_SIZE = 4096;
 
 struct ChunkGatedDeltaRuleFwdHCompileInfo {} compileInfo;
 
-static void TestOneParamCase(const ChunkGatedDeltaRuleFwdHTestParam &param)
+TensorDescription Tensor(std::initializer_list<int64_t> dims, ge::DataType dtype)
 {
-    gert::StorageShape kShape = {param.kShape, param.kShape};
-    gert::StorageShape wShape = {param.wShape, param.wShape};
-    gert::StorageShape uShape = {param.uShape, param.uShape};
-    gert::StorageShape gShape = {param.gShape, param.gShape};
-    gert::StorageShape initial_stateShape = {param.initial_stateShape, param.initial_stateShape};
-    gert::StorageShape cu_seqlensShape = {param.cu_seqlensShape, param.cu_seqlensShape};
-    gert::StorageShape chunk_indicesShape = {param.chunk_indicesShape, param.chunk_indicesShape};
-    gert::StorageShape hShape = {param.hShape, param.hShape};
-    gert::StorageShape vShape = {param.vShape, param.vShape};
-    gert::StorageShape final_stateShape = {param.final_stateShape, param.final_stateShape};
-    std::vector<gert::TilingContextPara::TensorDescription> inputTensorDesc_(
-        {{kShape, param.kDtype, param.kFormat},
-        {wShape, param.wDtype, param.wFormat},
-        {uShape, param.uDtype, param.uFormat},
-        {gShape, param.gDtype, param.gFormat},
-        {initial_stateShape, param.initial_stateDtype, param.initial_stateFormat},
-        {cu_seqlensShape, param.cu_seqlensDtype, param.cu_seqlensFormat},
-        {chunk_indicesShape, param.chunk_indicesDtype, param.chunk_indicesFormat}});
-    std::vector<gert::TilingContextPara::TensorDescription> outputTensorDesc_(
-        {{hShape, param.hDtype, param.hFormat},
-        {vShape, param.vDtype, param.vFormat},
-        {final_stateShape, param.final_stateDtype, param.final_stateFormat}});
-    std::vector<gert::TilingContextPara::OpAttr> attrs_;
-    attrs_.push_back(gert::TilingContextPara::OpAttr("chunk_size", Ops::Math::AnyValue::CreateFrom<int64_t>(64)));
-    gert::TilingContextPara tilingContextPara(
-        OP_NAME,
-        inputTensorDesc_,
-        outputTensorDesc_,
-        attrs_,
-        &compileInfo,
-        param.maxAIVNum,
-        param.ubSize,
-        param.tilingDataMaxSize);
-    ExecuteTestCase(tilingContextPara, param.status, param.expectTilingKey,
-                    param.expectTilingData, param.expectWorkspaces);
+    gert::StorageShape shape = {dims, dims};
+    return TensorDescription(shape, dtype, ge::FORMAT_ND);
 }
 
-TEST_P(ChunkGatedDeltaRuleFwdHTilingTest, tiling_test)
+std::vector<OpAttr> DefaultAttrs()
 {
-    const ChunkGatedDeltaRuleFwdHTestParam &param = GetParam();
-    TestOneParamCase(param);
+    return {OpAttr("chunk_size", Ops::Math::AnyValue::CreateFrom<int64_t>(64))};
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    ChunkGatedDeltaRuleFwdHTilingTests,
-    ChunkGatedDeltaRuleFwdHTilingTest,
-    testing::ValuesIn(testCases));
-
+const ChunkGatedDeltaRuleFwdHTilingData& Decode(const TilingInfo& info)
+{
+    EXPECT_EQ(info.tilingDataSize, sizeof(ChunkGatedDeltaRuleFwdHTilingData));
+    return *reinterpret_cast<const ChunkGatedDeltaRuleFwdHTilingData*>(info.tilingData.get());
 }
+
+TEST(ChunkGatedDeltaRuleFwdHTilingTest, VarLenAllOptionalPaths)
+{
+    std::vector<TensorDescription> inputs = {
+        Tensor({1, 10016, 2, 128}, ge::DT_BF16),
+        Tensor({1, 8, 10016, 128}, ge::DT_BF16),
+        Tensor({1, 8, 10016, 128}, ge::DT_BF16),
+        Tensor({1, 8, 10016}, ge::DT_FLOAT),
+        Tensor({2, 8, 128, 128}, ge::DT_BF16),
+        Tensor({3}, ge::DT_INT64),
+        Tensor({158, 2}, ge::DT_INT64),
+    };
+    std::vector<TensorDescription> outputs = {
+        Tensor({1, 8, 158, 128, 128}, ge::DT_BF16),
+        Tensor({1, 8, 10016, 128}, ge::DT_BF16),
+        Tensor({2, 8, 128, 128}, ge::DT_BF16),
+    };
+    gert::TilingContextPara context(
+        OP_NAME, inputs, outputs, DefaultAttrs(), &compileInfo, 16, UB_SIZE, TILING_DATA_SIZE);
+
+    TilingInfo info;
+    ASSERT_TRUE(ExecuteTiling(context, info));
+    EXPECT_EQ(info.tilingKey, 7);
+    EXPECT_GT(info.blockNum, 0U);
+    ASSERT_EQ(info.workspaceSizes.size(), 1U);
+
+    const auto& tiling = Decode(info);
+    EXPECT_EQ(tiling.batch, 1);
+    EXPECT_EQ(tiling.totalTokens, 10016);
+    EXPECT_EQ(tiling.sequenceCount, 2);
+    EXPECT_EQ(tiling.chunkCount, 158);
+    EXPECT_EQ(tiling.valueHeads, 8);
+    EXPECT_EQ(tiling.keyHeads, 2);
+    EXPECT_EQ(tiling.headRatio, 4);
+    EXPECT_EQ(tiling.keyDim, 128);
+    EXPECT_EQ(tiling.valueDim, 128);
+    EXPECT_EQ(tiling.vTileSize, 64);
+    EXPECT_EQ(tiling.vTileCount, 2);
+    EXPECT_EQ(tiling.taskCount, 32);
+    EXPECT_EQ(tiling.usedCoreNum, 16);
+    EXPECT_EQ(tiling.taskCountPerCore, 2);
+    EXPECT_EQ(tiling.taskTailCoreCount, 0);
+    EXPECT_EQ(tiling.hasInitialState, 1);
+    EXPECT_EQ(tiling.isVarLen, 1);
+    EXPECT_EQ(tiling.storeFinalState, 1);
+    EXPECT_EQ(tiling.mm1WorkspaceOffset, 0);
+    EXPECT_EQ(tiling.mm2WorkspaceOffset, 8192);
+    EXPECT_EQ(tiling.perCoreWorkspaceBytes, 24576);
+    EXPECT_EQ(
+        info.workspaceSizes[0],
+        tiling.systemWorkspaceBytes + tiling.usedCoreNum * tiling.perCoreWorkspaceBytes);
+
+    EXPECT_EQ(tiling.mm1Tiling.M, 64);
+    EXPECT_EQ(tiling.mm1Tiling.N, 64);
+    EXPECT_EQ(tiling.mm1Tiling.Ka, 128);
+    EXPECT_EQ(tiling.mm2Tiling.M, 128);
+    EXPECT_EQ(tiling.mm2Tiling.N, 64);
+    EXPECT_EQ(tiling.mm2Tiling.Ka, 64);
+}
+
+TEST(ChunkGatedDeltaRuleFwdHTilingTest, FixedLengthWithoutOptionalStateOrFinal)
+{
+    std::vector<TensorDescription> inputs = {
+        Tensor({1, 65, 2, 64}, ge::DT_BF16),
+        Tensor({1, 4, 65, 64}, ge::DT_BF16),
+        Tensor({1, 4, 65, 64}, ge::DT_BF16),
+        Tensor({1, 4, 65}, ge::DT_FLOAT),
+    };
+    std::vector<TensorDescription> outputs = {
+        Tensor({1, 4, 2, 64, 64}, ge::DT_BF16),
+        Tensor({1, 4, 65, 64}, ge::DT_BF16),
+    };
+    std::vector<uint32_t> inputInstances = {1, 1, 1, 1, 0, 0, 0};
+    std::vector<uint32_t> outputInstances = {1, 1, 0};
+    gert::TilingContextPara context(
+        OP_NAME, inputs, outputs, DefaultAttrs(), inputInstances, outputInstances,
+        &compileInfo, 16, UB_SIZE, TILING_DATA_SIZE);
+
+    TilingInfo info;
+    ASSERT_TRUE(ExecuteTiling(context, info));
+    EXPECT_EQ(info.tilingKey, 0);
+    EXPECT_GT(info.blockNum, 0U);
+    ASSERT_EQ(info.workspaceSizes.size(), 1U);
+
+    const auto& tiling = Decode(info);
+    EXPECT_EQ(tiling.sequenceCount, 1);
+    EXPECT_EQ(tiling.chunkCount, 2);
+    EXPECT_EQ(tiling.vTileSize, 64);
+    EXPECT_EQ(tiling.vTileCount, 1);
+    EXPECT_EQ(tiling.taskCount, 4);
+    EXPECT_EQ(tiling.usedCoreNum, 4);
+    EXPECT_EQ(tiling.taskCountPerCore, 1);
+    EXPECT_EQ(tiling.taskTailCoreCount, 0);
+    EXPECT_EQ(tiling.hasInitialState, 0);
+    EXPECT_EQ(tiling.isVarLen, 0);
+    EXPECT_EQ(tiling.storeFinalState, 0);
+    EXPECT_EQ(tiling.mm2WorkspaceOffset, 8192);
+    EXPECT_EQ(tiling.perCoreWorkspaceBytes, 16384);
+    EXPECT_EQ(
+        info.workspaceSizes[0],
+        tiling.systemWorkspaceBytes + tiling.usedCoreNum * tiling.perCoreWorkspaceBytes);
+}
+
+TEST(ChunkGatedDeltaRuleFwdHTilingTest, RejectsHalfPresentVarLenMetadata)
+{
+    std::vector<TensorDescription> inputs = {
+        Tensor({1, 64, 1, 64}, ge::DT_BF16),
+        Tensor({1, 1, 64, 64}, ge::DT_BF16),
+        Tensor({1, 1, 64, 64}, ge::DT_BF16),
+        Tensor({1, 1, 64}, ge::DT_FLOAT),
+        Tensor({2}, ge::DT_INT64),
+    };
+    std::vector<TensorDescription> outputs = {
+        Tensor({1, 1, 1, 64, 64}, ge::DT_BF16),
+        Tensor({1, 1, 64, 64}, ge::DT_BF16),
+    };
+    std::vector<uint32_t> inputInstances = {1, 1, 1, 1, 0, 1, 0};
+    std::vector<uint32_t> outputInstances = {1, 1, 0};
+    gert::TilingContextPara context(
+        OP_NAME, inputs, outputs, DefaultAttrs(), inputInstances, outputInstances,
+        &compileInfo, 16, UB_SIZE, TILING_DATA_SIZE);
+
+    TilingInfo info;
+    EXPECT_FALSE(ExecuteTiling(context, info));
+}
+
+}  // namespace
+}  // namespace ChunkGatedDeltaRuleFwdHUT

@@ -11,6 +11,19 @@ endif()
 
 message(STATUS "ASCEND_HOME_PATH: $ENV{ASCEND_HOME_PATH}")
 
+if(EXISTS "$ENV{ASCEND_HOME_PATH}/${CMAKE_HOST_SYSTEM_PROCESSOR}-linux")
+    set(CANN_ARCH_DIR "$ENV{ASCEND_HOME_PATH}/${CMAKE_HOST_SYSTEM_PROCESSOR}-linux")
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x64)$" AND
+       EXISTS "$ENV{ASCEND_HOME_PATH}/x86_64-linux")
+    set(CANN_ARCH_DIR "$ENV{ASCEND_HOME_PATH}/x86_64-linux")
+elseif(EXISTS "$ENV{ASCEND_HOME_PATH}/aarch64-linux")
+    set(CANN_ARCH_DIR "$ENV{ASCEND_HOME_PATH}/aarch64-linux")
+else()
+    message(FATAL_ERROR "Cannot locate architecture-specific CANN directory")
+endif()
+
+message(STATUS "CANN architecture directory: ${CANN_ARCH_DIR}")
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildGoogleTest.cmake)
 
 # DTYPE 宏定义（根据算子原型和测试用例生成）
@@ -28,9 +41,12 @@ add_definitions(
 )
 
 set(UT_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
-set(UT_COMMON_SRCS
+set(UT_INFERSHAPE_COMMON_SRCS
     ${UT_COMMON_DIR}/infershape_case_executor.cpp
     ${UT_COMMON_DIR}/infershape_context_faker.cpp
+)
+
+set(UT_TILING_COMMON_SRCS
     ${UT_COMMON_DIR}/tiling_case_executor.cpp
     ${UT_COMMON_DIR}/tiling_context_faker.cpp
 )
@@ -38,21 +54,21 @@ set(UT_COMMON_SRCS
 set(UT_COMMON_INCLUDE_DIRS
     ${UT_COMMON_DIR}
     $ENV{ASCEND_HOME_PATH}/include
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/include
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/include/base
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/include/base/context_builder
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/asc/include
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/asc/include/tiling
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/pkg_inc
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/op_common
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/base
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/exe_graph
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/graph
+    ${CANN_ARCH_DIR}/include
+    ${CANN_ARCH_DIR}/include/base
+    ${CANN_ARCH_DIR}/include/base/context_builder
+    ${CANN_ARCH_DIR}/asc/include
+    ${CANN_ARCH_DIR}/asc/include/tiling
+    ${CANN_ARCH_DIR}/pkg_inc
+    ${CANN_ARCH_DIR}/pkg_inc/op_common
+    ${CANN_ARCH_DIR}/pkg_inc/base
+    ${CANN_ARCH_DIR}/pkg_inc/exe_graph
+    ${CANN_ARCH_DIR}/pkg_inc/graph
 )
 
 set(UT_COMMON_LIB_DIRS
     $ENV{ASCEND_HOME_PATH}/lib64
-    $ENV{ASCEND_HOME_PATH}/aarch64-linux/lib64
+    ${CANN_ARCH_DIR}/lib64
 )
 
 add_compile_options(

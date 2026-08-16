@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <new>
 #include "gtest/gtest.h"
 #include "tikicpulib.h"
 
@@ -98,20 +99,33 @@ TEST_F(ChunkGatedDeltaRuleFwdHKernelTest, test_kernel_run)
     memcpy(cu_seqlens, cu_seqlensHost.data(), cu_seqlensByteSize);
     memcpy(chunk_indices, chunk_indicesHost.data(), chunk_indicesByteSize);
     
-    // TODO: 以下 tilingData 字段基于初始模板的 TilingData 结构。
-    //       修改 TilingData 结构后请更新字段名和赋值：
-    //         参考 op_kernel/chunk_gated_delta_rule_fwd_h_tiling_data.h 中的字段定义
-    //         参考 op_host/chunk_gated_delta_rule_fwd_h_tiling.cpp 中的 tiling 计算逻辑
-    ChunkGatedDeltaRuleFwdHTilingData* tilingData = reinterpret_cast<ChunkGatedDeltaRuleFwdHTilingData*>(tiling);
-    tilingData->totalNum = size;
-    tilingData->blockFactor = size;
-    tilingData->ubFactor = size;
+    // Kernel implementation is still a stub, but keep this CPU-debug launch
+    // structurally consistent with the current Host tiling contract.
+    ChunkGatedDeltaRuleFwdHTilingData* tilingData =
+        new (tiling) ChunkGatedDeltaRuleFwdHTilingData{};
+    tilingData->batch = 1;
+    tilingData->totalTokens = 10016;
+    tilingData->sequenceCount = 2;
+    tilingData->chunkCount = 158;
+    tilingData->valueHeads = 8;
+    tilingData->keyHeads = 2;
+    tilingData->keyDim = 128;
+    tilingData->valueDim = 128;
+    tilingData->chunkSize = 64;
+    tilingData->headRatio = 4;
+    tilingData->vTileSize = 64;
+    tilingData->vTileCount = 2;
+    tilingData->taskCount = 32;
+    tilingData->usedCoreNum = 1;
+    tilingData->taskCountPerCore = 32;
+    tilingData->hasInitialState = 1;
+    tilingData->isVarLen = 1;
+    tilingData->storeFinalState = 1;
     
-    // TODO: tilingKey 应与 op_host/chunk_gated_delta_rule_fwd_h_tiling.cpp 中 SetTilingKey 设置的值一致
-    ICPU_SET_TILING_KEY(0);
+    ICPU_SET_TILING_KEY(7);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
     
-    ICPU_RUN_KF((chunk_gated_delta_rule_fwd_h<0>), numBlocks, k, w, u, g, initial_state, cu_seqlens, chunk_indices, h, v, final_state, workspace, tiling);
+    ICPU_RUN_KF((chunk_gated_delta_rule_fwd_h<7>), numBlocks, k, w, u, g, initial_state, cu_seqlens, chunk_indices, h, v, final_state, workspace, tiling);
     
     // 将动态输出的 packed buffer 拆回 individual buffers
     

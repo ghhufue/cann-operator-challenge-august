@@ -19,8 +19,11 @@ set(OP_HOST_SRCS
 )
 
 set(UT_TEST_SRCS
+    test_${OP_NAME}_infershape.cpp
     test_${OP_NAME}_tiling.cpp
 )
+
+set(UT_EXEC_COMMON_SRCS ${UT_INFERSHAPE_COMMON_SRCS} ${UT_TILING_COMMON_SRCS})
 
 set(UT_MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/test_op_host_main.cpp)
 
@@ -55,7 +58,7 @@ target_link_libraries(${OP_HOST_SO} PRIVATE
 add_executable(${UT_EXE}
     ${UT_MAIN_SRC}
     ${UT_TEST_SRCS}
-    ${UT_COMMON_SRCS}
+    ${UT_EXEC_COMMON_SRCS}
 )
 
 target_include_directories(${UT_EXE} PRIVATE
