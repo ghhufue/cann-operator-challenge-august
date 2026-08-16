@@ -1,248 +1,369 @@
-#include <iostream>
-#include <vector>
-#include <cstring>
-#include <cstdint>
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "acl/acl.h"
 #include "aclnn_chunk_gated_delta_rule_fwd_h.h"
 
-#define CHECK_RET(cond, return_expr) \
-    do {                             \
-        if (!(cond)) {               \
-            return_expr;             \
-        }                            \
-    } while (0)
+namespace {
 
-#define LOG_PRINT(message, ...)         \
-    do {                                \
-        printf(message, ##__VA_ARGS__); \
-    } while (0)
+namespace fs = std::filesystem;
 
-int64_t GetShapeSize(const std::vector<int64_t>& shape)
+struct DeviceTensor {
+    aclTensor* tensor = nullptr;
+    void* deviceData = nullptr;
+    size_t bytes = 0;
+};
+
+void CheckAcl(aclError result, const char* operation)
 {
-    int64_t shapeSize = 1;
-    for (auto i : shape) {
-        shapeSize *= i;
+    if (result != ACL_SUCCESS) {
+        throw std::runtime_error(
+            std::string(operation) + " failed, acl error=" + std::to_string(result));
     }
-    return shapeSize;
 }
 
-int Init(int32_t deviceId, aclrtStream* stream)
+std::vector<uint8_t> ReadBinary(const fs::path& path)
 {
-    auto ret = aclInit(nullptr);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclInit failed. ERROR: %d\n", ret); return ret);
-    ret = aclrtSetDevice(deviceId);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSetDevice failed. ERROR: %d\n", ret); return ret);
-    ret = aclrtCreateStream(stream);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtCreateStream failed. ERROR: %d\n", ret); return ret);
-    return 0;
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream) {
+        throw std::runtime_error("Cannot open " + path.string());
+    }
+    const std::streamsize size = stream.tellg();
+    if (size < 0) {
+        throw std::runtime_error("Cannot determine file size for " + path.string());
+    }
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    stream.seekg(0);
+    if (size != 0) {
+        stream.read(reinterpret_cast<char*>(data.data()), size);
+    }
+    if (!stream) {
+        throw std::runtime_error("Cannot read " + path.string());
+    }
+    return data;
 }
 
-
-static uint16_t FloatToHalf(float f) {
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(float));
-    uint32_t sign = (bits >> 16) & 0x8000;
-    int32_t exp = ((bits >> 23) & 0xff) - 127 + 15;
-    uint32_t mant = (bits >> 13) & 0x3ff;
-    if (exp <= 0) return sign;
-    if (exp >= 31) return sign | 0x7c00;
-    return sign | (exp << 10) | mant;
-}
-
-static uint16_t FloatToBFloat16(float f) {
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(float));
-    return (uint16_t)(bits >> 16);
-}
-
-template <typename T>
-int CreateAclTensor(
-    const std::vector<T>& hostData, const std::vector<int64_t>& shape, void** deviceAddr, aclDataType dataType,
-    aclTensor** tensor)
+std::string ReadText(const fs::path& path)
 {
-    auto elemCount = GetShapeSize(shape);
-    int64_t elemSize = sizeof(T);
+    const std::vector<uint8_t> bytes = ReadBinary(path);
+    return std::string(bytes.begin(), bytes.end());
+}
+
+void WriteBinary(const fs::path& path, const std::vector<uint8_t>& data)
+{
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        throw std::runtime_error("Cannot create " + path.string());
+    }
+    if (!data.empty()) {
+        stream.write(
+            reinterpret_cast<const char*>(data.data()),
+            static_cast<std::streamsize>(data.size()));
+    }
+    if (!stream) {
+        throw std::runtime_error("Cannot write " + path.string());
+    }
+}
+
+int64_t JsonInteger(const std::string& json, const std::string& key)
+{
+    const std::string marker = "\"" + key + "\"";
+    const size_t keyPos = json.find(marker);
+    if (keyPos == std::string::npos) {
+        throw std::runtime_error("Missing integer key in manifest: " + key);
+    }
+    const size_t colon = json.find(':', keyPos + marker.size());
+    if (colon == std::string::npos) {
+        throw std::runtime_error("Malformed manifest key: " + key);
+    }
+    const size_t begin = json.find_first_of("-0123456789", colon + 1);
+    if (begin == std::string::npos) {
+        throw std::runtime_error("Missing integer value for manifest key: " + key);
+    }
+    size_t end = begin;
+    if (json[end] == '-') {
+        ++end;
+    }
+    while (end < json.size() && json[end] >= '0' && json[end] <= '9') {
+        ++end;
+    }
+    return std::stoll(json.substr(begin, end - begin));
+}
+
+size_t DataTypeBytes(aclDataType dataType)
+{
     switch (dataType) {
-        case aclDataType::ACL_FLOAT16:
-        case aclDataType::ACL_BF16:
-        case aclDataType::ACL_INT16:
-        case aclDataType::ACL_UINT16:
-            elemSize = 2;
-            break;
-        case aclDataType::ACL_INT8:
-        case aclDataType::ACL_UINT8:
-        case aclDataType::ACL_BOOL:
-            elemSize = 1;
-            break;
-        case aclDataType::ACL_INT64:
-        case aclDataType::ACL_UINT64:
-        case aclDataType::ACL_DOUBLE:
-            elemSize = 8;
-            break;
+        case ACL_BF16:
+        case ACL_FLOAT16:
+        case ACL_INT16:
+        case ACL_UINT16:
+            return 2;
+        case ACL_FLOAT:
+        case ACL_INT32:
+        case ACL_UINT32:
+            return 4;
+        case ACL_INT64:
+        case ACL_UINT64:
+        case ACL_DOUBLE:
+            return 8;
+        case ACL_INT8:
+        case ACL_UINT8:
+        case ACL_BOOL:
+            return 1;
         default:
-            break;
+            throw std::runtime_error("Unsupported ACL data type");
     }
-    auto size = elemCount * elemSize;
-    auto ret = aclrtMalloc(deviceAddr, size, ACL_MEM_MALLOC_HUGE_FIRST);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMalloc failed. ERROR: %d\n", ret); return ret);
-
-    std::vector<uint8_t> convBuf(size);
-    if (dataType == aclDataType::ACL_FLOAT16) {
-        for (int64_t i = 0; i < elemCount; i++) {
-            uint16_t h = FloatToHalf(static_cast<float>(hostData[i]));
-            memcpy(convBuf.data() + i * 2, &h, 2);
-        }
-    } else if (dataType == aclDataType::ACL_BF16) {
-        for (int64_t i = 0; i < elemCount; i++) {
-            uint16_t b = FloatToBFloat16(static_cast<float>(hostData[i]));
-            memcpy(convBuf.data() + i * 2, &b, 2);
-        }
-    } else if (dataType == aclDataType::ACL_DOUBLE) {
-        for (int64_t i = 0; i < elemCount; i++) {
-            double d = static_cast<double>(hostData[i]);
-            memcpy(convBuf.data() + i * 8, &d, 8);
-        }
-    } else {
-        auto copySize = std::min((int64_t)(elemCount * sizeof(T)), size);
-        memcpy(convBuf.data(), hostData.data(), copySize);
-    }
-    ret = aclrtMemcpy(*deviceAddr, size, convBuf.data(), size, ACL_MEMCPY_HOST_TO_DEVICE);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMemcpy failed. ERROR: %d\n", ret); return ret);
-
-    std::vector<int64_t> strides(shape.size(), 1);
-    for (int64_t i = shape.size() - 2; i >= 0; i--) {
-        strides[i] = shape[i + 1] * strides[i + 1];
-    }
-
-    *tensor = aclCreateTensor(
-        shape.data(), shape.size(), dataType, strides.data(), 0, aclFormat::ACL_FORMAT_ND, shape.data(), shape.size(),
-        *deviceAddr);
-    return 0;
 }
 
-int main()
+size_t TensorBytes(const std::vector<int64_t>& shape, aclDataType dataType)
 {
-    int32_t deviceId = 0;
-    aclrtStream stream;
-    auto ret = Init(deviceId, &stream);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Init acl failed. ERROR: %d\n", ret); return ret);
+    size_t elements = 1;
+    for (const int64_t dim : shape) {
+        if (dim <= 0 || elements > std::numeric_limits<size_t>::max() / static_cast<size_t>(dim)) {
+            throw std::runtime_error("Invalid or overflowing tensor shape");
+        }
+        elements *= static_cast<size_t>(dim);
+    }
+    return elements * DataTypeBytes(dataType);
+}
 
-    // 构造输入 tensor
-    aclTensor* k = nullptr;
-    void* kDeviceAddr = nullptr;
-    aclTensor* w = nullptr;
-    void* wDeviceAddr = nullptr;
-    aclTensor* u = nullptr;
-    void* uDeviceAddr = nullptr;
-    aclTensor* g = nullptr;
-    void* gDeviceAddr = nullptr;
-    aclTensor* initial_state = nullptr;
-    void* initial_stateDeviceAddr = nullptr;
-    aclTensor* cu_seqlens = nullptr;
-    void* cu_seqlensDeviceAddr = nullptr;
-    aclTensor* chunk_indices = nullptr;
-    void* chunk_indicesDeviceAddr = nullptr;
-    std::vector<int64_t> kShape = {1, 10016, 2, 128};
-    std::vector<float> kHostData(2564096, 1);
-    ret = CreateAclTensor(kHostData, kShape, &kDeviceAddr, aclDataType::ACL_BF16, &k);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> wShape = {1, 8, 10016, 128};
-    std::vector<float> wHostData(10256384, 1);
-    ret = CreateAclTensor(wHostData, wShape, &wDeviceAddr, aclDataType::ACL_BF16, &w);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> uShape = {1, 8, 10016, 128};
-    std::vector<float> uHostData(10256384, 1);
-    ret = CreateAclTensor(uHostData, uShape, &uDeviceAddr, aclDataType::ACL_BF16, &u);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> gShape = {1, 8, 10016};
-    std::vector<float> gHostData(80128, 1);
-    ret = CreateAclTensor(gHostData, gShape, &gDeviceAddr, aclDataType::ACL_FLOAT, &g);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> initial_stateShape = {2, 8, 128, 128};
-    std::vector<float> initial_stateHostData(262144, 1);
-    ret = CreateAclTensor(initial_stateHostData, initial_stateShape, &initial_stateDeviceAddr, aclDataType::ACL_BF16, &initial_state);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> cu_seqlensShape = {3};
-    std::vector<int64_t> cu_seqlensHostData(3, 1);
-    ret = CreateAclTensor(cu_seqlensHostData, cu_seqlensShape, &cu_seqlensDeviceAddr, aclDataType::ACL_INT64, &cu_seqlens);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> chunk_indicesShape = {158, 2};
-    std::vector<int64_t> chunk_indicesHostData(316, 1);
-    ret = CreateAclTensor(chunk_indicesHostData, chunk_indicesShape, &chunk_indicesDeviceAddr, aclDataType::ACL_INT64, &chunk_indices);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
+std::vector<int64_t> ContiguousStrides(const std::vector<int64_t>& shape)
+{
+    std::vector<int64_t> strides(shape.size(), 1);
+    for (int64_t index = static_cast<int64_t>(shape.size()) - 2; index >= 0; --index) {
+        strides[static_cast<size_t>(index)] =
+            shape[static_cast<size_t>(index + 1)] * strides[static_cast<size_t>(index + 1)];
+    }
+    return strides;
+}
 
-    // 构造输出 tensor
-    aclTensor* h = nullptr;
-    void* hDeviceAddr = nullptr;
-    aclTensor* v = nullptr;
-    void* vDeviceAddr = nullptr;
-    aclTensor* final_state = nullptr;
-    void* final_stateDeviceAddr = nullptr;
-    std::vector<int64_t> hShape = {1, 8, 158, 128, 128};
-    std::vector<float> hHostData(20709376, 0);
-    ret = CreateAclTensor(hHostData, hShape, &hDeviceAddr, aclDataType::ACL_BF16, &h);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> vShape = {1, 8, 10016, 128};
-    std::vector<float> vHostData(10256384, 0);
-    ret = CreateAclTensor(vHostData, vShape, &vDeviceAddr, aclDataType::ACL_BF16, &v);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    std::vector<int64_t> final_stateShape = {2, 8, 128, 128};
-    std::vector<float> final_stateHostData(262144, 0);
-    ret = CreateAclTensor(final_stateHostData, final_stateShape, &final_stateDeviceAddr, aclDataType::ACL_BF16, &final_state);
-    CHECK_RET(ret == ACL_SUCCESS, return ret);
-    
+DeviceTensor CreateTensor(
+    const std::vector<int64_t>& shape,
+    aclDataType dataType,
+    const std::vector<uint8_t>* hostData)
+{
+    DeviceTensor result;
+    result.bytes = TensorBytes(shape, dataType);
+    if (hostData != nullptr && hostData->size() != result.bytes) {
+        throw std::runtime_error(
+            "Input file size mismatch: expected " + std::to_string(result.bytes) +
+            ", got " + std::to_string(hostData->size()));
+    }
 
-    // 调用 aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize 第一段接口
+    CheckAcl(
+        aclrtMalloc(&result.deviceData, result.bytes, ACL_MEM_MALLOC_HUGE_FIRST),
+        "aclrtMalloc");
+    if (hostData != nullptr) {
+        CheckAcl(
+            aclrtMemcpy(
+                result.deviceData,
+                result.bytes,
+                hostData->data(),
+                hostData->size(),
+                ACL_MEMCPY_HOST_TO_DEVICE),
+            "aclrtMemcpy host-to-device");
+    }
+
+    const std::vector<int64_t> strides = ContiguousStrides(shape);
+    result.tensor = aclCreateTensor(
+        shape.data(),
+        static_cast<uint64_t>(shape.size()),
+        dataType,
+        strides.data(),
+        0,
+        ACL_FORMAT_ND,
+        shape.data(),
+        static_cast<uint64_t>(shape.size()),
+        result.deviceData);
+    if (result.tensor == nullptr) {
+        aclrtFree(result.deviceData);
+        result.deviceData = nullptr;
+        throw std::runtime_error("aclCreateTensor failed");
+    }
+    return result;
+}
+
+DeviceTensor CreateInput(
+    const fs::path& path,
+    const std::vector<int64_t>& shape,
+    aclDataType dataType)
+{
+    const std::vector<uint8_t> data = ReadBinary(path);
+    return CreateTensor(shape, dataType, &data);
+}
+
+void DestroyTensor(DeviceTensor& tensor)
+{
+    if (tensor.tensor != nullptr) {
+        aclDestroyTensor(tensor.tensor);
+        tensor.tensor = nullptr;
+    }
+    if (tensor.deviceData != nullptr) {
+        aclrtFree(tensor.deviceData);
+        tensor.deviceData = nullptr;
+    }
+}
+
+void CopyOutput(const DeviceTensor& tensor, const fs::path& path)
+{
+    std::vector<uint8_t> hostData(tensor.bytes);
+    CheckAcl(
+        aclrtMemcpy(
+            hostData.data(),
+            hostData.size(),
+            tensor.deviceData,
+            tensor.bytes,
+            ACL_MEMCPY_DEVICE_TO_HOST),
+        "aclrtMemcpy device-to-host");
+    WriteBinary(path, hostData);
+}
+
+int RunCase(const fs::path& caseDir, int32_t deviceId)
+{
+    const std::string manifest = ReadText(caseDir / "manifest.json");
+    const int64_t totalTokens = JsonInteger(manifest, "total_tokens");
+    const int64_t chunkCount = JsonInteger(manifest, "total_chunks");
+    const int64_t valueHeads = JsonInteger(manifest, "hv");
+    const int64_t keyHeads = JsonInteger(manifest, "hk");
+    const int64_t dimension = JsonInteger(manifest, "dim");
+
+    const fs::path cuSeqlensPath = caseDir / "input_cu_seqlens.bin";
+    const size_t cuSeqlensBytes = fs::file_size(cuSeqlensPath);
+    if (cuSeqlensBytes < 2 * sizeof(int64_t) || cuSeqlensBytes % sizeof(int64_t) != 0) {
+        throw std::runtime_error("Invalid input_cu_seqlens.bin size");
+    }
+    const int64_t sequenceCount =
+        static_cast<int64_t>(cuSeqlensBytes / sizeof(int64_t)) - 1;
+    const bool hasInitialState = fs::exists(caseDir / "input_initial_state.bin");
+
+    std::cout << "Running case " << caseDir.filename().string()
+              << ": device=" << deviceId
+              << ", T=" << totalTokens
+              << ", N=" << sequenceCount
+              << ", NT=" << chunkCount
+              << ", HV/HK=" << valueHeads << "/" << keyHeads
+              << ", D=" << dimension
+              << ", initial_state=" << (hasInitialState ? "yes" : "no")
+              << std::endl;
+
+    aclrtStream stream = nullptr;
+    CheckAcl(aclInit(nullptr), "aclInit");
+    uint32_t deviceCount = 0;
+    CheckAcl(aclrtGetDeviceCount(&deviceCount), "aclrtGetDeviceCount");
+    if (deviceId < 0 || static_cast<uint32_t>(deviceId) >= deviceCount) {
+        throw std::runtime_error(
+            "Logical device " + std::to_string(deviceId) + " is unavailable; device count=" +
+            std::to_string(deviceCount));
+    }
+    CheckAcl(aclrtSetDevice(deviceId), "aclrtSetDevice");
+    CheckAcl(aclrtCreateStream(&stream), "aclrtCreateStream");
+
+    DeviceTensor k = CreateInput(
+        caseDir / "input_k.bin", {1, totalTokens, keyHeads, dimension}, ACL_BF16);
+    DeviceTensor w = CreateInput(
+        caseDir / "input_w.bin", {1, valueHeads, totalTokens, dimension}, ACL_BF16);
+    DeviceTensor u = CreateInput(
+        caseDir / "input_u.bin", {1, valueHeads, totalTokens, dimension}, ACL_BF16);
+    DeviceTensor g = CreateInput(
+        caseDir / "input_g.bin", {1, valueHeads, totalTokens}, ACL_FLOAT);
+    DeviceTensor cuSeqlens = CreateInput(
+        cuSeqlensPath, {sequenceCount + 1}, ACL_INT64);
+    DeviceTensor chunkIndices = CreateInput(
+        caseDir / "input_chunk_indices.bin", {chunkCount, 2}, ACL_INT64);
+
+    DeviceTensor initialState;
+    if (hasInitialState) {
+        initialState = CreateInput(
+            caseDir / "input_initial_state.bin",
+            {sequenceCount, valueHeads, dimension, dimension},
+            ACL_BF16);
+    }
+
+    DeviceTensor h = CreateTensor(
+        {1, valueHeads, chunkCount, dimension, dimension}, ACL_BF16, nullptr);
+    DeviceTensor v = CreateTensor(
+        {1, valueHeads, totalTokens, dimension}, ACL_BF16, nullptr);
+    DeviceTensor finalState = CreateTensor(
+        {sequenceCount, valueHeads, dimension, dimension}, ACL_BF16, nullptr);
+
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
-    ret = aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(k, w, u, g, initial_state, cu_seqlens, chunk_indices, 64, h, v, final_state, &workspaceSize, &executor);
-    CHECK_RET(ret == 0, LOG_PRINT("aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize failed. ERROR: %d\n", ret); return ret);
+    CheckAcl(
+        aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
+            k.tensor,
+            w.tensor,
+            u.tensor,
+            g.tensor,
+            hasInitialState ? initialState.tensor : nullptr,
+            cuSeqlens.tensor,
+            chunkIndices.tensor,
+            64,
+            h.tensor,
+            v.tensor,
+            finalState.tensor,
+            &workspaceSize,
+            &executor),
+        "aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize");
 
-    // 申请 workspace
-    void* workspaceAddr = nullptr;
-    if (workspaceSize > 0) {
-        ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
+    void* workspace = nullptr;
+    if (workspaceSize != 0) {
+        CheckAcl(
+            aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST),
+            "aclrtMalloc workspace");
     }
+    CheckAcl(
+        aclnnChunkGatedDeltaRuleFwdH(
+            workspace, workspaceSize, executor, stream),
+        "aclnnChunkGatedDeltaRuleFwdH");
+    CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
 
-    // 调用 aclnnChunkGatedDeltaRuleFwdH 第二段接口
-    ret = aclnnChunkGatedDeltaRuleFwdH(workspaceAddr, workspaceSize, executor, stream);
-    CHECK_RET(ret == 0, LOG_PRINT("aclnnChunkGatedDeltaRuleFwdH failed. ERROR: %d\n", ret); return ret);
+    CopyOutput(h, caseDir / "actual_h.bin");
+    CopyOutput(v, caseDir / "actual_v.bin");
+    CopyOutput(finalState, caseDir / "actual_final_state.bin");
 
-    // 同步等待
-    ret = aclrtSynchronizeStream(stream);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSynchronizeStream failed. ERROR: %d\n", ret); return ret);
+    std::cout << "Wrote actual_h.bin, actual_v.bin, and actual_final_state.bin"
+              << std::endl;
 
-    // 释放资源
-    aclDestroyTensor(k);
-    aclrtFree(kDeviceAddr);
-    aclDestroyTensor(w);
-    aclrtFree(wDeviceAddr);
-    aclDestroyTensor(u);
-    aclrtFree(uDeviceAddr);
-    aclDestroyTensor(g);
-    aclrtFree(gDeviceAddr);
-    aclDestroyTensor(initial_state);
-    aclrtFree(initial_stateDeviceAddr);
-    aclDestroyTensor(cu_seqlens);
-    aclrtFree(cu_seqlensDeviceAddr);
-    aclDestroyTensor(chunk_indices);
-    aclrtFree(chunk_indicesDeviceAddr);
-    
-    aclDestroyTensor(h);
-    aclrtFree(hDeviceAddr);
-    aclDestroyTensor(v);
-    aclrtFree(vDeviceAddr);
-    aclDestroyTensor(final_state);
-    aclrtFree(final_stateDeviceAddr);
-    if (workspaceSize > 0) {
-        aclrtFree(workspaceAddr);
+    if (workspace != nullptr) {
+        aclrtFree(workspace);
     }
-
+    DestroyTensor(k);
+    DestroyTensor(w);
+    DestroyTensor(u);
+    DestroyTensor(g);
+    DestroyTensor(initialState);
+    DestroyTensor(cuSeqlens);
+    DestroyTensor(chunkIndices);
+    DestroyTensor(h);
+    DestroyTensor(v);
+    DestroyTensor(finalState);
     aclrtDestroyStream(stream);
     aclrtResetDevice(deviceId);
     aclFinalize();
-
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    if (argc < 2 || argc > 3) {
+        std::cerr << "Usage: " << argv[0] << " CASE_DIR [LOGICAL_DEVICE_ID]" << std::endl;
+        return 2;
+    }
+    try {
+        const int32_t deviceId = argc == 3 ? std::stoi(argv[2]) : 0;
+        return RunCase(fs::absolute(argv[1]), deviceId);
+    } catch (const std::exception& error) {
+        std::cerr << "NPU validation runner failed: " << error.what() << std::endl;
+        return 1;
+    }
 }

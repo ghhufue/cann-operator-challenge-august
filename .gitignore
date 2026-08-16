@@ -1,0 +1,16 @@
+# CMake/CANN build output directories.
+**/build/
+**/build-*/
+**/build_out/
+**/build-out/
+**/cmake-build-*/
+
+# Python bytecode and caches.
+**/__pycache__/
+*.py[cod]
+
+# Generated operator UT inputs, outputs, and simulator diagnostics.
+**/tests/ut/op_kernel/*_data/*.bin
+**/tests/ut/op_kernel/*_data/cceprint/
+**/tests/ut/op_kernel/*_data/npuchk/
+**/tests/ut/op_kernel/*_data/stub_reg.log
