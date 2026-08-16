@@ -43,6 +43,8 @@ def compare_output(
     actual_path: Path,
     shape: tuple[int, ...],
     max_mismatches: int,
+    abs_tolerance: float = ABS_TOLERANCE,
+    rel_tolerance: float = REL_TOLERANCE,
 ) -> bool:
     golden_bits, golden_bf16 = load_bf16(golden_path, shape)
     actual_bits, actual_bf16 = load_bf16(actual_path, shape)
@@ -66,8 +68,8 @@ def compare_output(
     passed = (
         bit_equal
         | special_equal
-        | (absolute_error <= ABS_TOLERANCE)
-        | (relative_error <= REL_TOLERANCE)
+        | (absolute_error <= abs_tolerance)
+        | (relative_error <= rel_tolerance)
     )
 
     total = passed.size
@@ -101,7 +103,12 @@ def compare_output(
     return failed == 0
 
 
-def compare_case(case_dir: Path, max_mismatches: int) -> bool:
+def compare_case(
+    case_dir: Path,
+    max_mismatches: int,
+    abs_tolerance: float = ABS_TOLERANCE,
+    rel_tolerance: float = REL_TOLERANCE,
+) -> bool:
     manifest_path = case_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     tensors = manifest["tensors"]
@@ -119,6 +126,8 @@ def compare_case(case_dir: Path, max_mismatches: int) -> bool:
             case_dir / actual_name,
             shape,
             max_mismatches,
+            abs_tolerance,
+            rel_tolerance,
         )
         all_passed = all_passed and passed
     return all_passed
@@ -133,13 +142,30 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="maximum number of failing elements printed per output",
     )
+    parser.add_argument(
+        "--abs-tol",
+        type=float,
+        default=ABS_TOLERANCE,
+        help="absolute tolerance (default: %(default)g)",
+    )
+    parser.add_argument(
+        "--rel-tol",
+        type=float,
+        default=REL_TOLERANCE,
+        help="relative tolerance (default: %(default)g)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        passed = compare_case(args.case_dir.resolve(), args.max_mismatches)
+        passed = compare_case(
+            args.case_dir.resolve(),
+            args.max_mismatches,
+            args.abs_tol,
+            args.rel_tol,
+        )
     except (OSError, KeyError, TypeError, ValueError) as error:
         print(f"Comparison failed: {error}")
         return 2

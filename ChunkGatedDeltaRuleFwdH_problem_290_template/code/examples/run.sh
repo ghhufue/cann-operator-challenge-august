@@ -61,7 +61,12 @@ export LD_LIBRARY_PATH="${OP_BUILD_DIR}/op_host:${CURRENT_VENDOR_DIR}/op_api/lib
 if [ -n "${VALIDATION_CASES:-}" ]; then
     IFS=',' read -r -a CASE_NAMES <<< "${VALIDATION_CASES}"
 else
-    mapfile -t CASE_NAMES < <("${PYTHON_BIN}" "${GOLDEN_GENERATOR}" --list-cases | cut -d: -f1)
+    # Run every case directory that has already been generated (named or
+    # --stress cases). Falls back to the generator's built-in case list.
+    mapfile -t CASE_NAMES < <(find "${DATA_DIR}" -mindepth 1 -maxdepth 1 -type d         -exec test -f "{}/manifest.json" \; -printf '%f\n' | sort)
+    if [ "${#CASE_NAMES[@]}" -eq 0 ]; then
+        mapfile -t CASE_NAMES < <("${PYTHON_BIN}" "${GOLDEN_GENERATOR}" --list-cases | cut -d: -f1)
+    fi
 fi
 
 if [ "${#CASE_NAMES[@]}" -eq 0 ]; then

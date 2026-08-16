@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -115,6 +116,143 @@ CASES: tuple[CaseSpec, ...] = (
         dim=128,
         seed=97,
         description="Minimum official sequence length with grouped value heads.",
+    ),
+
+    CaseSpec(
+        name="official_example",
+        seq_lens=(61, 3),
+        hv=16,
+        hk=2,
+        dim=128,
+        seed=101,
+        description="Packed config from problem.txt: HV=16, HK=2, D=128, two short sequences.",
+    ),
+    CaseSpec(
+        name="single_token",
+        seq_lens=(1,),
+        hv=2,
+        hk=1,
+        dim=32,
+        seed=103,
+        description="Single-token sequence; partial chunk of length one.",
+    ),
+    CaseSpec(
+        name="long_1024_single",
+        seq_lens=(1024,),
+        hv=1,
+        hk=1,
+        dim=128,
+        seed=107,
+        description="Sixteen full chunks, single head/tile, long recurrence.",
+    ),
+    CaseSpec(
+        name="long_1024_heads",
+        seq_lens=(1024,),
+        hv=16,
+        hk=2,
+        dim=128,
+        seed=109,
+        description="Official-style head count at T=1024: HV=16, HK=2, D=128.",
+    ),
+    CaseSpec(
+        name="long_1024_wide",
+        seq_lens=(1024,),
+        hv=2,
+        hk=1,
+        dim=256,
+        seed=113,
+        description="Four value tiles with a long recurrence.",
+    ),
+    CaseSpec(
+        name="long_2048_heads",
+        seq_lens=(2048,),
+        hv=8,
+        hk=2,
+        dim=128,
+        seed=127,
+        description="Thirty-two chunks with grouped heads.",
+    ),
+    CaseSpec(
+        name="long_4096_single",
+        seq_lens=(4096,),
+        hv=1,
+        hk=1,
+        dim=64,
+        seed=131,
+        description="Sixty-four chunks; many tasks over the whole device.",
+    ),
+    CaseSpec(
+        name="long_4096_heads",
+        seq_lens=(4096,),
+        hv=16,
+        hk=4,
+        dim=128,
+        seed=137,
+        description="Sixty-four chunks with many heads; stresses multi-core task spread.",
+    ),
+    CaseSpec(
+        name="varlen_many",
+        seq_lens=(5, 64, 129, 1023),
+        hv=4,
+        hk=2,
+        dim=64,
+        seed=139,
+        description="Four packed sequences from tiny to long (token_batch limit is 4).",
+    ),
+    CaseSpec(
+        name="varlen_eval_style",
+        seq_lens=(61, 3, 512, 1024),
+        hv=16,
+        hk=2,
+        dim=128,
+        seed=149,
+        description="Official example packed with two long sequences.",
+    ),
+    CaseSpec(
+        name="no_state_long",
+        seq_lens=(1024,),
+        hv=2,
+        hk=1,
+        dim=64,
+        seed=151,
+        description="Long recurrence from implicit zero state.",
+        with_initial_state=False,
+    ),
+    CaseSpec(
+        name="boundary_1023_1024_1025",
+        seq_lens=(1023, 1024, 1025),
+        hv=2,
+        hk=1,
+        dim=32,
+        seed=157,
+        description="Packed sequences around the sixteen-chunk boundary.",
+    ),
+    CaseSpec(
+        name="heads_equal_hk_hv",
+        seq_lens=(1, 2, 3, 64),
+        hv=8,
+        hk=8,
+        dim=32,
+        seed=163,
+        description="HK equals HV: no head grouping, one key head per value head.",
+    ),
+    CaseSpec(
+        name="wide_state_256",
+        seq_lens=(65,),
+        hv=4,
+        hk=1,
+        dim=256,
+        seed=167,
+        description="Four value tiles with grouped value heads.",
+    ),
+    CaseSpec(
+        name="judge_2048_32h",
+        seq_lens=(2048,),
+        hv=32,
+        hk=4,
+        dim=128,
+        seed=173,
+        description="Thirty-two value heads over thirty-two chunks.",
     ),
 )
 
@@ -520,6 +658,58 @@ def generate_case(spec: CaseSpec, output_dir: Path | None) -> dict[str, object]:
     return summary
 
 
+
+
+STRESS_SEQ_LEN_POOL = (1, 2, 5, 63, 64, 65, 127, 128, 129, 200, 255, 256, 511, 512, 1023, 1024, 2048, 4096)
+STRESS_HV_POOL = (1, 2, 4, 8, 16, 32)
+STRESS_HK_POOL = (1, 2, 4, 8)
+STRESS_DIM_POOL = (16, 32, 64, 128, 256)
+MAX_STRESS_H_ELEMENTS = 24_000_000  # cap the h output size (~48 MB BF16) per case
+
+
+def build_stress_specs(count: int, seed: int) -> list[CaseSpec]:
+    """Deterministically sample a diverse grid of legal shapes."""
+    rng = random.Random(seed)
+    specs: list[CaseSpec] = []
+    attempt = 0
+    while len(specs) < count and attempt < 2000:
+        attempt += 1
+        dim = rng.choice(STRESS_DIM_POOL)
+        hv = rng.choice(STRESS_HV_POOL)
+        hk = rng.choice([h for h in STRESS_HK_POOL if hv % h == 0])
+        layout = rng.choice(("single", "packed"))
+        if layout == "single":
+            seq_lens = (rng.choice(STRESS_SEQ_LEN_POOL),)
+        else:
+            nseq = rng.randint(2, 4)  # build_case caps token_batch at 4
+            seq_lens = tuple(rng.choice(STRESS_SEQ_LEN_POOL) for _ in range(nseq))
+        chunks = sum((length + CHUNK_SIZE - 1) // CHUNK_SIZE for length in seq_lens)
+        h_elements = hv * chunks * dim * dim
+        if h_elements > MAX_STRESS_H_ELEMENTS:
+            # Scale heads down until the case fits; keeps the layout informative.
+            while hv > 1 and h_elements > MAX_STRESS_H_ELEMENTS:
+                hv //= 2
+                hk = min(hk, hv)
+                while hk > 1 and hv % hk != 0:
+                    hk //= 2
+                h_elements = hv * chunks * dim * dim
+        with_state = rng.random() < 0.7
+        seed_i = (seed * 1_000_003 + len(specs) * 7919 + attempt * 13) & 0x7FFFFFFF
+        specs.append(
+            CaseSpec(
+                name=f"stress_{len(specs):03d}",
+                seq_lens=seq_lens,
+                hv=hv,
+                hk=hk,
+                dim=dim,
+                seed=seed_i,
+                description=f"Stress sample: layout={layout}, T={sum(seq_lens)}, HV/HK={hv}/{hk}, D={dim}.",
+                with_initial_state=with_state,
+            )
+        )
+    return specs
+
+
 def select_cases(names: list[str] | None) -> list[CaseSpec]:
     if not names or "all" in names:
         return list(CASES)
@@ -549,6 +739,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--list-cases", action="store_true", help="list available cases and exit"
     )
+    parser.add_argument(
+        "--stress",
+        type=int,
+        default=0,
+        metavar="N",
+        help="additionally generate N deterministic random stress cases",
+    )
+    parser.add_argument(
+        "--stress-seed",
+        type=int,
+        default=20260817,
+        help="seed for the deterministic stress-case sampler",
+    )
     return parser.parse_args()
 
 
@@ -562,7 +765,14 @@ def main() -> int:
             )
         return 0
 
-    selected = select_cases(args.case)
+    if args.stress > 0 and not args.case:
+        # A bare --stress run only materializes the sampled cases so the
+        # server does not regenerate every named case on each iteration.
+        selected = []
+    else:
+        selected = list(select_cases(args.case))
+    if args.stress > 0:
+        selected.extend(build_stress_specs(args.stress, args.stress_seed))
     output_dir = None if args.validate_only else args.output_dir.resolve()
     for spec in selected:
         summary = generate_case(spec, output_dir)
@@ -573,6 +783,21 @@ def main() -> int:
     if output_dir is None:
         print(f"Validated {len(selected)} case(s); no files written.")
     else:
+        if args.stress > 0:
+            specs_path = output_dir / "stress_cases.json"
+            specs_path.write_text(
+                json.dumps(
+                    [asdict(spec) for spec in selected[-args.stress:]],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"Wrote stress specs to {specs_path}")
+        if not selected:
+            print("No cases selected (use --case NAME or --stress N).")
+            return 1
         print(f"Generated {len(selected)} case(s) under {output_dir}")
     return 0
 
