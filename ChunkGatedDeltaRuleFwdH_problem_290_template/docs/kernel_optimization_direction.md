@@ -73,7 +73,7 @@ stateBuf_ Local，继续下一个 chunk
 
 当前已经具备：
 
-- `MIX_AIC_1_2` Kernel；
+- `MIX_AIC_1_1` Kernel；
 - 两个 Ascend C 高阶 Matmul；
 - H 状态跨 chunk 保持 Local，不从 GM 重新加载；
 - `Vnew` 在 Local 中直接继续计算 `V_decay`；
@@ -156,7 +156,7 @@ MM2: [K,64] × [64,VTile] → [K,VTile]
 5. 如果输出为 NZ，Vector 如何按正确逻辑读取 `[M,N]`；
 6. 是否需要 NZ→ND 转换，以及转换开销是否仍低于 GM 往返；
 7. `K=32/64/128/256`、`VTile<=64` 和最后一个 V tile 是否都能使用；
-8. `MIX_AIC_1_2` 下两个 AIV 子核的同步和数据归属；
+8. 当前 `MIX_AIC_1_1` 下 AIC/AIV 的同步和数据归属；如果后续要切回 `MIX_AIC_1_2`，必须先把每个任务的 Vector 工作显式拆给两个 AIV，并补齐相应同步；
 9. MM1、MM2 两个 Matmul 对象连续使用本地输出时是否存在事件冲突；
 10. 本地输出是否仍需要隐藏的缓存 workspace。
 

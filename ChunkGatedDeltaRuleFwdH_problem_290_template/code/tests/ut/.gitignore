@@ -1,1 +1,6 @@
 /build*/
+/op_kernel/*_data/*.bin
+/op_kernel/*_data/cceprint/
+/op_kernel/*_data/npuchk/
+/op_kernel/*_data/stub_reg.log
+/op_kernel/*_data/__pycache__/

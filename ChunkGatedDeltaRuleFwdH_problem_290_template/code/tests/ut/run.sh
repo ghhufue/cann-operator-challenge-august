@@ -48,16 +48,13 @@ DATA_DIR="${SCRIPT_DIR}/op_kernel/chunk_gated_delta_rule_fwd_h_data"
 cd "${DATA_DIR}"
 python3 gen_data.py
 
-# 运行 Kernel UT
-cd "${BUILD_DIR}/op_kernel"
-if ./chunk_gated_delta_rule_fwd_h_op_kernel_ut; then
+# 运行 Kernel UT。在数据目录中运行，使 Kernel UT 与 Golden 读取同一批 bin 文件。
+cd "${DATA_DIR}"
+if "${BUILD_DIR}/op_kernel/chunk_gated_delta_rule_fwd_h_op_kernel_ut"; then
     PASSED_TESTS+=("op_kernel")
 else
     FAILED_TESTS+=("op_kernel")
 fi
-
-# 拷贝输出 bin 文件到 DATA_DIR 供 compare_data.py 比对
-cp "${BUILD_DIR}/op_kernel/"*.bin "${DATA_DIR}/" 2>/dev/null || true
 
 # 精度比对
 echo "========================================"

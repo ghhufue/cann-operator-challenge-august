@@ -6,11 +6,11 @@
 - 阶段 2 的 shape inference 与静态参数校验已完成：支持标准变长输入、固定长度输入和可选 `initial_state/final_state`，并将公开数据类型收紧为题目要求的 BF16 主路径。
 - 阶段 2 的 tiling 数据结构和 Host tiling 已完成：任务按 `(sequence, value_head, v_tile)` 划分，生成两份 `TCubeTiling`，并规划每核 Cube/Vector 交接 workspace。
 - 固定形状双 Matmul MIX 编译探针已完成，确认两个 Matmul 对象和 Vector LocalTensor 输入组合可在 Ascend910B 上生成设备目标文件；详细结论见 `matmul_validation.md`。
-- 生产 Kernel 的接入版已实现并通过 Ascend910B 设备编译：入口为 `MIX_AIC_1_2`，注册两个高阶 Matmul，完成任务解码、变长 chunk 寻址、每核 workspace、W/K 补零整理和片上状态递推。
+- 生产 Kernel 的接入版已实现并通过 Ascend910B 设备编译：入口为 `MIX_AIC_1_1`，注册两个高阶 Matmul，完成任务解码、变长 chunk 寻址、每核 workspace、W/K 补零整理和片上状态递推。当前每个任务由一个 AIC 和一个 AIV 协作完成，Vector 工作尚未拆给第二个 AIV。
 - Vector 数值路径已按参考顺序接入：`U-WH`、保存 `v_new`、门控衰减、旧状态衰减和 `Hnext` 合并均保留 FP16/FP32/BF16 舍入点。
-- WSL CANN 9.1.0 已成功编译完整算子包；15 个 Shape inference Host UT 和 3 个 Tiling Host UT 全部通过。该环境没有真实 NPU，因此尚不能把阶段 3 标为“数值正确性完成”。
+- WSL CANN 9.1.0 已成功编译完整算子包；15 个 Shape inference Host UT 和 3 个 Tiling Host UT 全部通过。Kernel CPU 仿真已使用一个合法的小型递推用例实际执行两次 Matmul，`h`、`v_new`、`final_state` 均与 BF16 Golden 完全一致。该环境没有真实 NPU，因此尚不能把阶段 3 标为“真机验证完成”。
 
-当前阶段 3 的状态是“实现和编译完成、等待真机数值验证”。首轮真机验证必须重点检查：Matmul 结果中的 NaN 清零、`cast_to_float16` 对有限溢出的饱和，以及 `MIX_AIC_1_2` 两个 AIV 子核的执行行为。
+当前阶段 3 的状态是“实现、编译和 CPU 仿真完成，等待真机数值验证”。首轮真机验证必须重点检查：Matmul 结果中的 NaN 清零、`cast_to_float16` 对有限溢出的饱和，以及多任务、多核下 `MIX_AIC_1_1` 的任务映射和同步行为。
 
 ## 1. 实现原则
 

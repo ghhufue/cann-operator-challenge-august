@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 import glob
+import os
+
 import numpy as np
 from ml_dtypes import bfloat16
-
-import json
 import torch
-import torch.nn.functional as F
-import math
-import random
-
-import os
 
 def cdiv_torch(a, b):
     return (a + b - 1) // b
@@ -46,7 +40,7 @@ def run_cpu(k, w, u, g, initial_state, cu_seqlens, chunk_indices, chunk_size):
     HV, V = u.shape[1], u.shape[3]
     BT = chunk_size  # 固定为64
     if cu_seqlens is None:
-        N, NT, chunk_offsets = B, (T + BT - 1) # 等长序列
+        N, NT, chunk_offsets = B, (T + BT - 1) // BT, None # 等长序列
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT) # 变长序列
     if initial_state is not None:
@@ -130,22 +124,26 @@ def run_cpu(k, w, u, g, initial_state, cu_seqlens, chunk_indices, chunk_size):
 
 
 def impl(k, w, u, g, initial_state, cu_seqlens, chunk_indices, chunk_size):
-    k = np.asarray(k, dtype=np.float32)
-    w = np.asarray(w, dtype=np.float32)
-    u = np.asarray(u, dtype=np.float32)
-    initial_state = np.asarray(initial_state, dtype=np.float32)
-    
-    k = torch.from_numpy(k)
-    w = torch.from_numpy(w)
-    u = torch.from_numpy(u)
-    g = torch.from_numpy(g)
-    initial_state = torch.from_numpy(initial_state)
+    # NumPy/torch cannot exchange ml_dtypes.bfloat16 directly.  Bridge via
+    # float32, then restore the operator's real BF16 input dtype before the
+    # reference calculation; otherwise both Matmuls incorrectly return FP32.
+    k = torch.from_numpy(np.asarray(k, dtype=np.float32)).to(torch.bfloat16)
+    w = torch.from_numpy(np.asarray(w, dtype=np.float32)).to(torch.bfloat16)
+    u = torch.from_numpy(np.asarray(u, dtype=np.float32)).to(torch.bfloat16)
+    g = torch.from_numpy(np.asarray(g, dtype=np.float32))
+    initial_state = torch.from_numpy(
+        np.asarray(initial_state, dtype=np.float32)
+    ).to(torch.bfloat16)
     cu_seqlens = torch.from_numpy(cu_seqlens)
     chunk_indices = torch.from_numpy(chunk_indices)
     
     cpu_output_0, cpu_output_1, cpu_output_2 = run_cpu(k, w, u, g, initial_state, cu_seqlens, chunk_indices, chunk_size)
     
-    return cpu_output_0.detach().cpu().numpy().astype(bfloat16), cpu_output_1.detach().cpu().numpy().astype(bfloat16), cpu_output_2.detach().cpu().numpy().astype(bfloat16)
+    return (
+        cpu_output_0.detach().float().cpu().numpy().astype(bfloat16),
+        cpu_output_1.detach().float().cpu().numpy().astype(bfloat16),
+        cpu_output_2.detach().float().cpu().numpy().astype(bfloat16),
+    )
 
 
 if __name__ == "__main__":
@@ -174,14 +172,19 @@ if __name__ == "__main__":
     }
     np_type = d_type_dict[d_type]
     
-    # 生成输入数据
-    input_k = np.ones((1, 10016, 2, 128)).astype(d_type_dict["bfloat16"])
-    input_w = np.ones((1, 8, 10016, 128)).astype(d_type_dict["bfloat16"])
-    input_u = np.ones((1, 8, 10016, 128)).astype(d_type_dict["bfloat16"])
-    input_g = np.ones((1, 8, 10016)).astype(d_type_dict["float32"])
-    input_initial_state = np.ones((2, 8, 128, 128)).astype(d_type_dict["bfloat16"])
-    input_cu_seqlens = np.ones((3)).astype(d_type_dict["int64"])
-    input_chunk_indices = np.ones((158, 2)).astype(d_type_dict["int64"])
+    # A small but real varlen case.  It executes one complete chunk update,
+    # including both Matmuls, and keeps the CPU simulator fast enough for UT.
+    # cu_seqlens must start at zero and end at the flattened token count.
+    rng = np.random.default_rng(290)
+    input_k = rng.uniform(-0.125, 0.125, (1, 5, 1, 32)).astype(d_type_dict["bfloat16"])
+    input_w = rng.uniform(-0.125, 0.125, (1, 1, 5, 32)).astype(d_type_dict["bfloat16"])
+    input_u = rng.uniform(-0.25, 0.25, (1, 1, 5, 32)).astype(d_type_dict["bfloat16"])
+    input_g = -0.05 * np.arange(1, 6, dtype=np.float32).reshape(1, 1, 5)
+    input_initial_state = rng.uniform(-0.0625, 0.0625, (1, 1, 32, 32)).astype(
+        d_type_dict["bfloat16"]
+    )
+    input_cu_seqlens = np.array([0, 5], dtype=d_type_dict["int64"])
+    input_chunk_indices = np.array([[0, 0]], dtype=d_type_dict["int64"])
     attr_chunk_size = 64
     
     # 计算 golden 数据

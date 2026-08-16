@@ -99,7 +99,7 @@ fi
 if [ "$RUN_UT" = true ]; then
   echo "[INFO] Running UT tests..."
   cd "${BASE_PATH}/tests/ut"
-  ./run.sh
+  bash ./run.sh
   UT_RESULT=$?
   if [ $UT_RESULT -ne 0 ]; then
     echo "[ERROR] UT tests failed"
@@ -147,7 +147,7 @@ if [ "$RUN_EXAMPLE" = true ]; then
   echo "----------------------------------------------------------------"
   echo "[INFO] Running examples..."
   cd "${BASE_PATH}/examples"
-  ./run.sh
+  bash ./run.sh
   EXAMPLE_RESULT=$?
   cd - > /dev/null
   if [ $EXAMPLE_RESULT -ne 0 ]; then

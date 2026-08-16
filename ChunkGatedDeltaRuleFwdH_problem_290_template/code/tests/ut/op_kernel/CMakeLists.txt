@@ -22,6 +22,8 @@ set(OP_KERNEL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../op_kernel)
 
 set(UT_TEST_SRCS
     test_${OP_NAME}.cpp
+    kernel_tiling_bridge.cpp
+    ${UT_TILING_COMMON_SRCS}
 )
 
 set(UT_INCLUDE_DIRS
@@ -59,6 +61,8 @@ target_include_directories(${UT_EXE} PRIVATE
 )
 
 target_compile_definitions(${UT_EXE} PRIVATE
+    BUILD_SOC_VERSION=Ascend910B
+    OP_HOST_UT_SO_PATH="$<TARGET_FILE:${OP_NAME}_op_host_ut_lib>"
     _GLIBCXX_USE_CXX11_ABI=0
     __aicore__=
     __NPU_TILING__=1
@@ -81,14 +85,25 @@ target_link_directories(${UT_EXE} PRIVATE
 target_link_libraries(${UT_EXE} PRIVATE
     gtest_main
     gtest
+    -Wl,--no-as-needed
+    ${CANN_HOME}/lib64/libmetadef.so
+    ${CANN_HOME}/lib64/libunified_dlog.so
+    ${CANN_HOME}/lib64/libopp_registry.so
+    ${CANN_HOME}/lib64/libregister.so
+    ${CANN_HOME}/lib64/libgraph.so
+    ${CANN_HOME}/lib64/libgraph_base.so
+    ${CANN_HOME}/lib64/libplatform.so
+    ${CANN_HOME}/lib64/libc_sec.so
     ${CANN_HOME}/lib64/libmmpa.so
     tikicpulib::${SOC_VERSION}
     dl
     pthread
 )
 
+add_dependencies(${UT_EXE} ${OP_NAME}_op_host_ut_lib)
+
 set_target_properties(${UT_EXE} PROPERTIES
-    INSTALL_RPATH "$ORIGIN;${CANN_HOME}/lib64;${CANN_HOME}/tools/tikicpulib/lib;${CANN_HOME}/tools/tikicpulib/lib/Ascend910B1;${CANN_HOME}/aarch64-linux/simulator/Ascend910B1/lib"
+    INSTALL_RPATH "$ORIGIN;$ORIGIN/../op_host;${CANN_HOME}/lib64;${CANN_HOME}/tools/tikicpulib/lib;${CANN_HOME}/tools/tikicpulib/lib/Ascend910B1;${CANN_ARCH_DIR}/simulator/dav_2201/lib;${CANN_ARCH_DIR}/simulator/Ascend910B1/lib"
     BUILD_WITH_INSTALL_RPATH TRUE
 )
 

@@ -249,7 +249,7 @@ ge::graphStatus ChunkGatedDeltaRuleFwdHTilingFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED);
 
     const uint32_t usedAic = static_cast<uint32_t>(tiling->usedCoreNum);
-    const uint32_t usedAiv = std::min<uint32_t>(resources.aivCoreNum, usedAic * 2U);
+    const uint32_t usedAiv = std::min<uint32_t>(resources.aivCoreNum, usedAic);
     context->SetBlockDim(resources.platform.CalcTschBlockDim(usedAic, usedAic, usedAiv));
 
     const uint64_t scheduleMode =
