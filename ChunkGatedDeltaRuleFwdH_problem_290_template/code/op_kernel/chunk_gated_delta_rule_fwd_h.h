@@ -16,6 +16,12 @@ namespace NsChunkGatedDeltaRuleFwdH {
 
 using namespace AscendC;
 
+// Cross-core event IDs used to hand AIV-produced matmul inputs to the AIC
+// on Ascend 910B. IDs 0-3 are reserved by the two Matmul KFC instances and
+// 11-14 by the framework's superkernel sync; 4/5 are free for AIV -> AIC.
+constexpr uint16_t kMm1InputsReadyEvent = 4;
+constexpr uint16_t kMm2InputsReadyEvent = 5;
+
 using Mm1AType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
 using Mm1BType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
 using Mm1CType = MatmulType<TPosition::GM, CubeFormat::ND, bfloat16_t>;
@@ -447,6 +453,15 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
         StoreState(hGm_, hBase, task, state);
 
         PackW(task, tokenStart, actualLen, chunkLocal);
+        // MM1 reads chunkLocal/state from UB; both are produced by the AIV.
+        // Notify the AIC only after all AIV writes are visible.
+        if ASCEND_IS_AIV {
+            PipeBarrier<PIPE_ALL>();
+            NotifyEvent<PIPE_MTE3>(kMm1InputsReadyEvent);
+        }
+        if ASCEND_IS_AIC {
+            WaitEvent(kMm1InputsReadyEvent);
+        }
         mm1.SetTensorA(chunkLocal);
         mm1.SetTensorB(state);
         mm1.template IterateAll<true>(mm1ResultGm_);
@@ -462,6 +477,15 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
+        // MM2 reads chunkLocal/stage from UB; both are produced by the AIV.
+        // Notify the AIC only after all AIV writes are visible.
+        if ASCEND_IS_AIV {
+            PipeBarrier<PIPE_ALL>();
+            NotifyEvent<PIPE_MTE3>(kMm2InputsReadyEvent);
+        }
+        if ASCEND_IS_AIC {
+            WaitEvent(kMm2InputsReadyEvent);
+        }
         mm2.SetTensorA(chunkLocal, true);
         mm2.SetTensorB(stage);
         mm2.template IterateAll<true>(mm2ResultGm_);
