@@ -8,6 +8,7 @@
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
+#include "lib/matmul_intf.h"
 #include "chunk_gated_delta_rule_fwd_h_tiling_data.h"
 #include "chunk_gated_delta_rule_fwd_h_tiling_key.h"
 
