@@ -21,6 +21,7 @@ using namespace AscendC;
 // 11-14 by the framework's superkernel sync; 4/5 are free for AIV -> AIC.
 constexpr uint16_t kMm1InputsReadyEvent = 4;
 constexpr uint16_t kMm2InputsReadyEvent = 5;
+constexpr int64_t kDebugAlignment = 512;
 
 using Mm1AType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
 using Mm1BType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
@@ -70,7 +71,8 @@ private:
     __aicore__ inline void ComputeValueAndDecay(
         const TaskInfo& task, int64_t tokenStart, int64_t actualLen,
         const LocalTensor<T>& stage, const LocalTensor<half>& halfWork,
-        const LocalTensor<float>& calcWork, const LocalTensor<T>& chunkStorage);
+        const LocalTensor<float>& calcWork, const LocalTensor<T>& chunkStorage,
+        bool dump);
     __aicore__ inline void MergeDelta(
         const LocalTensor<T>& state, const LocalTensor<T>& delta,
         const LocalTensor<half>& halfWork, const LocalTensor<float>& calcWork);
@@ -89,6 +91,13 @@ private:
     GlobalTensor<T> finalStateGm_;
     GlobalTensor<T> mm1ResultGm_;
     GlobalTensor<T> mm2ResultGm_;
+    GlobalTensor<T> debugWsGm_;
+    GlobalTensor<half> debugVNewGm_;
+    GlobalTensor<half> debugGateGm_;
+    GlobalTensor<T> debugVDecayGm_;
+    GlobalTensor<T> debugHDecayGm_;
+    GlobalTensor<T> debugMm2Gm_;
+    GlobalTensor<T> debugNextHGm_;
 
     TBuf<TPosition::VECCALC> stateBuf_;
     TBuf<TPosition::VECCALC> chunkBuf_;
@@ -146,6 +155,38 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::Init(
         reinterpret_cast<__gm__ T*>(coreWorkspace + tiling_->mm2WorkspaceOffset),
         stateElements_);
 
+    if (tiling_->debugWorkspaceBytes > 0) {
+        __gm__ uint8_t* debugBase = reinterpret_cast<__gm__ uint8_t*>(workspace) +
+            tiling_->debugWorkspaceOffset;
+        int64_t debugPos = 0;
+        debugWsGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugVNewGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ half*>(debugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(half) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugGateGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ half*>(debugBase + debugPos), tiling_->chunkSize);
+        debugPos = (debugPos + tiling_->chunkSize * sizeof(half) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugVDecayGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugHDecayGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
+        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugMm2Gm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
+        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugNextHGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
+    }
+
     if ASCEND_IS_AIV {
         pipe->InitBuffer(stateBuf_, stateElements_ * sizeof(T));
         pipe->InitBuffer(chunkBuf_, chunkElements_ * sizeof(T));
@@ -159,7 +200,8 @@ template <typename T>
 __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
     const TaskInfo& task, int64_t tokenStart, int64_t actualLen,
     const LocalTensor<T>& stage, const LocalTensor<half>& halfWork,
-    const LocalTensor<float>& calcWork, const LocalTensor<T>& chunkStorage)
+    const LocalTensor<float>& calcWork, const LocalTensor<T>& chunkStorage,
+    bool dump)
 {
     if ASCEND_IS_AIV {
         const int64_t tile = tiling_->vTileSize;
@@ -207,6 +249,9 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
         Adds(gateFloat, gateFloat, gLast, actualLen);
         Exp(gateFloat, gateFloat, actualLen);
         Cast(gateHalf, gateFloat, RoundMode::CAST_NONE, actualLen);
+        if (dump) {
+            DataCopy(debugGateGm_, gateHalf, actualLen);
+        }
 
         // alpha = exp(round_to_fp16(g_last)), matching the reference's
         // explicit FP16 conversion before the state decay exponent.
@@ -225,6 +270,9 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(whFloat, halfWork[row * tile], RoundMode::CAST_NONE, tile);
             Sub(valueFloat, valueFloat, whFloat, tile);
             Cast(scalarHalf, valueFloat, RoundMode::CAST_NONE, tile);
+            if (dump) {
+                DataCopy(debugVNewGm_[row * tile], scalarHalf, tile);
+            }
 
             // Save the un-decayed v_new output as BF16.
             Cast(valueFloat, scalarHalf, RoundMode::CAST_NONE, tile);
@@ -248,6 +296,9 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(valueFloat, scalarHalf, RoundMode::CAST_NONE, tile);
             Cast(stage[row * tile], valueFloat, RoundMode::CAST_RINT, tile);
         }
+        if (dump) {
+            DataCopy(debugVDecayGm_, stage, actualLen * tile);
+        }
         if (actualLen < tiling_->chunkSize) {
             Duplicate(stage[actualLen * tile], static_cast<T>(0),
                       (tiling_->chunkSize - actualLen) * tile);
@@ -262,6 +313,9 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(halfWork[row * tile], whFloat, RoundMode::CAST_NONE, tile);
             Cast(whFloat, halfWork[row * tile], RoundMode::CAST_NONE, tile);
             Cast(stateBuf_.Get<T>()[row * tile], whFloat, RoundMode::CAST_RINT, tile);
+        }
+        if (dump) {
+            DataCopy(debugHDecayGm_, stateBuf_.Get<T>(), stateElements_);
         }
     }
 }
@@ -446,6 +500,10 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
         const int64_t tokenStart = bos + chunk * tiling_->chunkSize;
         const int64_t remaining = eos - tokenStart;
         const int64_t actualLen = remaining < tiling_->chunkSize ? remaining : tiling_->chunkSize;
+        bool dump = false;
+        if ASCEND_IS_AIV {
+            dump = blockIdx_ == 0 && taskId == 0 && chunk == 0;
+        }
 
         const int64_t hBase =
             (task.valueHead * tiling_->chunkCount + globalChunk) *
@@ -472,9 +530,12 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             event_t mm1Ready = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
             SetFlag<HardEvent::MTE2_V>(mm1Ready);
             WaitFlag<HardEvent::MTE2_V>(mm1Ready);
+            if (dump) {
+                DataCopy(debugWsGm_, stage, actualLen * tiling_->vTileSize);
+            }
         }
         ComputeValueAndDecay(
-            task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
+            task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal, dump);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
         // MM2 reads chunkLocal/stage from UB; both are produced by the AIV.
@@ -496,8 +557,14 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             event_t mm2Ready = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
             SetFlag<HardEvent::MTE2_V>(mm2Ready);
             WaitFlag<HardEvent::MTE2_V>(mm2Ready);
+            if (dump) {
+                DataCopy(debugMm2Gm_, chunkLocal, stateElements_);
+            }
         }
         MergeDelta(state, chunkLocal, halfWork, calcWork);
+        if (dump) {
+            DataCopy(debugNextHGm_, state, stateElements_);
+        }
     }
 
     if (tiling_->storeFinalState != 0) {

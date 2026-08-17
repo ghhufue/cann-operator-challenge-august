@@ -329,6 +329,20 @@ int RunCase(const fs::path& caseDir, int32_t deviceId)
     CopyOutput(v, caseDir / "actual_v.bin");
     CopyOutput(finalState, caseDir / "actual_final_state.bin");
 
+    if (workspace != nullptr && workspaceSize != 0) {
+        std::vector<uint8_t> workspaceHost(static_cast<size_t>(workspaceSize));
+        CheckAcl(
+            aclrtMemcpy(
+                workspaceHost.data(),
+                workspaceHost.size(),
+                workspace,
+                workspaceSize,
+                ACL_MEMCPY_DEVICE_TO_HOST),
+            "aclrtMemcpy workspace device-to-host");
+        WriteBinary(caseDir / "actual_workspace.bin", workspaceHost);
+        std::cout << "Wrote actual_workspace.bin" << std::endl;
+    }
+
     std::cout << "Wrote actual_h.bin, actual_v.bin, and actual_final_state.bin"
               << std::endl;
 

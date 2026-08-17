@@ -49,6 +49,25 @@ int64_t AlignUp(int64_t value, int64_t alignment)
     return CeilDiv(value, alignment) * alignment;
 }
 
+int64_t ComputeDebugWorkspaceBytes(int64_t chunkSize, int64_t vTileSize, int64_t keyDim)
+{
+    const int64_t wsBytes = chunkSize * vTileSize * BF16_BYTES;
+    const int64_t stateBytes = keyDim * vTileSize * BF16_BYTES;
+    int64_t total = 0;
+    auto addField = [&total](int64_t bytes) {
+        total = AlignUp(total, WORKSPACE_ALIGNMENT);
+        total += bytes;
+    };
+    addField(wsBytes);       // ws
+    addField(wsBytes);       // v_new_fp16
+    addField(chunkSize * BF16_BYTES); // gate_fp16
+    addField(wsBytes);       // v_decay_bf16
+    addField(stateBytes);    // h_decay_bf16
+    addField(stateBytes);    // mm2_bf16
+    addField(stateBytes);    // next_h_bf16
+    return AlignUp(total, WORKSPACE_ALIGNMENT);
+}
+
 bool ResolveInputIndex(const gert::TilingContext* context, size_t irIndex, size_t& instanceIndex)
 {
     const gert::AnchorInstanceInfo* instanceInfo = context->GetIrInputInstanceInfo(irIndex);
@@ -140,12 +159,19 @@ ge::graphStatus SetWorkspace(
     tiling.perCoreWorkspaceBytes =
         AlignUp(tiling.mm2WorkspaceOffset + mm2Bytes, WORKSPACE_ALIGNMENT);
     tiling.systemWorkspaceBytes = static_cast<int64_t>(resources.systemWorkspaceBytes);
+    tiling.debugWorkspaceBytes =
+        ComputeDebugWorkspaceBytes(tiling.chunkSize, tiling.vTileSize, tiling.keyDim);
 
     size_t* workspace = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
     const uint64_t userWorkspace =
         static_cast<uint64_t>(tiling.perCoreWorkspaceBytes) * static_cast<uint64_t>(tiling.usedCoreNum);
-    workspace[0] = resources.systemWorkspaceBytes + userWorkspace;
+    tiling.debugWorkspaceOffset = AlignUp(
+        static_cast<int64_t>(resources.systemWorkspaceBytes) +
+            static_cast<int64_t>(userWorkspace),
+        WORKSPACE_ALIGNMENT);
+    workspace[0] = static_cast<uint64_t>(tiling.debugWorkspaceOffset) +
+        static_cast<uint64_t>(tiling.debugWorkspaceBytes);
     return ge::GRAPH_SUCCESS;
 }
 
