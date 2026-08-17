@@ -531,12 +531,18 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
 
         PackW(task, tokenStart, actualLen, chunkLocal);
         Cast(matFloat, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
+        event_t matFloatReady = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(matFloatReady);
+        WaitFlag<HardEvent::V_S>(matFloatReady);
         MatmulWStateP4(matFloat, state, stage, calcWork, actualLen);
         ComputeValueAndDecay(
             task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
         Cast(matFloat, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
+        event_t matFloatReady = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(matFloatReady);
+        WaitFlag<HardEvent::V_S>(matFloatReady);
         MatmulKtVDecaySeq(matFloat, stage, deltaBf16, calcWork, actualLen);
         MergeDelta(state, deltaBf16, halfWork, calcWork);
     }
