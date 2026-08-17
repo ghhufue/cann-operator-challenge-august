@@ -172,8 +172,8 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::Init(
         stateElements_);
 
     if (tiling_->debugWorkspaceBytes > 0) {
-        debugBase_ = reinterpret_cast<__gm__ uint8_t*>(workspace) +
-            tiling_->debugWorkspaceOffset;
+        debugBase_ = GetUserWorkspace(workspace) +
+            tiling_->perCoreWorkspaceBytes * tiling_->usedCoreNum;
     }
 
     if ASCEND_IS_AIV {
