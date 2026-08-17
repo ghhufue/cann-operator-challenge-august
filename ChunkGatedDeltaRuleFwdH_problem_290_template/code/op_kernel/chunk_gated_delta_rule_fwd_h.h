@@ -58,11 +58,11 @@ private:
         const LocalTensor<T>& state, const LocalTensor<T>& delta,
         const LocalTensor<half>& halfWork, const LocalTensor<float>& calcWork);
     __aicore__ inline void MatmulWStateP4(
-        LocalTensor<half>& wHalf, LocalTensor<T>& state,
+        LocalTensor<T>& w, LocalTensor<T>& state,
         LocalTensor<T>& out, LocalTensor<float>& scratch,
         int64_t actualLen);
     __aicore__ inline void MatmulKtVDecaySeq(
-        LocalTensor<half>& kHalf, LocalTensor<T>& vDecay,
+        LocalTensor<T>& kt, LocalTensor<T>& vDecay,
         LocalTensor<T>& out, LocalTensor<float>& scratch,
         int64_t actualLen);
     __aicore__ inline void ProcessTask(int64_t taskId);
@@ -270,7 +270,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MergeDelta(
 
 template <typename T>
 __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulWStateP4(
-    LocalTensor<half>& wHalf, LocalTensor<T>& state,
+    LocalTensor<T>& w, LocalTensor<T>& state,
     LocalTensor<T>& out, LocalTensor<float>& scratch,
     int64_t actualLen)
 {
@@ -295,24 +295,24 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulWStateP4(
             int64_t k = 0;
             for (; k + 4 <= kDim; k += 4) {
                 Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(wHalf.GetValue(m * kDim + k)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k), tile);
                 Add(acc0, acc0, prod, tile);
 
                 Cast(rowF, state[(k + 1) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(wHalf.GetValue(m * kDim + k + 1)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 1), tile);
                 Add(acc1, acc1, prod, tile);
 
                 Cast(rowF, state[(k + 2) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(wHalf.GetValue(m * kDim + k + 2)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 2), tile);
                 Add(acc2, acc2, prod, tile);
 
                 Cast(rowF, state[(k + 3) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(wHalf.GetValue(m * kDim + k + 3)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 3), tile);
                 Add(acc3, acc3, prod, tile);
             }
             for (; k < kDim; ++k) {
                 Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(wHalf.GetValue(m * kDim + k)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k), tile);
                 const int64_t lane = k & 3;
                 if (lane == 0) {
                     Add(acc0, acc0, prod, tile);
@@ -335,7 +335,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulWStateP4(
 
 template <typename T>
 __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulKtVDecaySeq(
-    LocalTensor<half>& kHalf, LocalTensor<T>& vDecay,
+    LocalTensor<T>& kt, LocalTensor<T>& vDecay,
     LocalTensor<T>& out, LocalTensor<float>& scratch,
     int64_t actualLen)
 {
@@ -350,7 +350,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulKtVDecaySeq(
             Duplicate(accN, 0.0f, tile);
             for (int64_t t = 0; t < actualLen; ++t) {
                 Cast(rowF, vDecay[t * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(kHalf.GetValue(t * kDim + m)), tile);
+                Muls(prod, rowF, kt.GetValue(t * kDim + m), tile);
                 Add(accN, accN, prod, tile);
             }
             Cast(out[m * tile], accN, RoundMode::CAST_RINT, tile);
@@ -500,16 +500,17 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
     LocalTensor<T> state;
     LocalTensor<T> chunkLocal;
     LocalTensor<T> stage;
+    LocalTensor<T> deltaBf16;
     LocalTensor<half> halfWork;
     LocalTensor<float> calcWork;
-    LocalTensor<half> matHalf;
     if ASCEND_IS_AIV {
         state = stateBuf_.Get<T>();
         chunkLocal = chunkBuf_.Get<T>();
         stage = stageBuf_.Get<T>();
+        LocalTensor<half> halfHandle = halfWorkBuf_.Get<half>();
+        deltaBf16 = halfHandle.ReinterpretCast<T>();
         halfWork = halfWorkBuf_.Get<half>();
         calcWork = calcWorkBuf_.Get<float>();
-        matHalf = halfWorkBuf_.Get<half>();
     }
     InitState(task, state);
 
@@ -525,21 +526,13 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
         StoreState(hGm_, hBase, task, state);
 
         PackW(task, tokenStart, actualLen, chunkLocal);
-        Cast(matHalf, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
-        event_t matHalfReady1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(matHalfReady1);
-        WaitFlag<HardEvent::V_S>(matHalfReady1);
-        MatmulWStateP4(matHalf, state, stage, calcWork, actualLen);
+        MatmulWStateP4(chunkLocal, state, stage, calcWork, actualLen);
         ComputeValueAndDecay(
             task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
-        Cast(matHalf, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
-        event_t matHalfReady2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(matHalfReady2);
-        WaitFlag<HardEvent::V_S>(matHalfReady2);
-        MatmulKtVDecaySeq(matHalf, stage, chunkLocal, calcWork, actualLen);
-        MergeDelta(state, chunkLocal, halfWork, calcWork);
+        MatmulKtVDecaySeq(chunkLocal, stage, deltaBf16, calcWork, actualLen);
+        MergeDelta(state, deltaBf16, halfWork, calcWork);
     }
 
     if (tiling_->storeFinalState != 0) {
