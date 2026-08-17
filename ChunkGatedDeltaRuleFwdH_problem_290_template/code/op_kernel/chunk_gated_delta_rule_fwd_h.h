@@ -295,24 +295,24 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulWStateP4(
             int64_t k = 0;
             for (; k + 4 <= kDim; k += 4) {
                 Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k).GetFloatValue(), tile);
                 Add(acc0, acc0, prod, tile);
 
                 Cast(rowF, state[(k + 1) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 1)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 1).GetFloatValue(), tile);
                 Add(acc1, acc1, prod, tile);
 
                 Cast(rowF, state[(k + 2) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 2)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 2).GetFloatValue(), tile);
                 Add(acc2, acc2, prod, tile);
 
                 Cast(rowF, state[(k + 3) * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 3)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k + 3).GetFloatValue(), tile);
                 Add(acc3, acc3, prod, tile);
             }
             for (; k < kDim; ++k) {
                 Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k)), tile);
+                Muls(prod, rowF, w.GetValue(m * kDim + k).GetFloatValue(), tile);
                 const int64_t lane = k & 3;
                 if (lane == 0) {
                     Add(acc0, acc0, prod, tile);
@@ -350,7 +350,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulKtVDecaySeq(
             Duplicate(accN, 0.0f, tile);
             for (int64_t t = 0; t < actualLen; ++t) {
                 Cast(rowF, vDecay[t * tile], RoundMode::CAST_NONE, tile);
-                Muls(prod, rowF, static_cast<float>(kt.GetValue(t * kDim + m)), tile);
+                Muls(prod, rowF, kt.GetValue(t * kDim + m).GetFloatValue(), tile);
                 Add(accN, accN, prod, tile);
             }
             Cast(out[m * tile], accN, RoundMode::CAST_RINT, tile);
