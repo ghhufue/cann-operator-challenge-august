@@ -531,18 +531,18 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
 
         PackW(task, tokenStart, actualLen, chunkLocal);
         Cast(matFloat, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
-        event_t matFloatReady = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(matFloatReady);
-        WaitFlag<HardEvent::V_S>(matFloatReady);
+        event_t matFloatReady1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(matFloatReady1);
+        WaitFlag<HardEvent::V_S>(matFloatReady1);
         MatmulWStateP4(matFloat, state, stage, calcWork, actualLen);
         ComputeValueAndDecay(
             task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
         Cast(matFloat, chunkLocal, RoundMode::CAST_NONE, chunkElements_);
-        event_t matFloatReady = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(matFloatReady);
-        WaitFlag<HardEvent::V_S>(matFloatReady);
+        event_t matFloatReady2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(matFloatReady2);
+        WaitFlag<HardEvent::V_S>(matFloatReady2);
         MatmulKtVDecaySeq(matFloat, stage, deltaBf16, calcWork, actualLen);
         MergeDelta(state, deltaBf16, halfWork, calcWork);
     }
