@@ -8,7 +8,6 @@
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "lib/matmul_intf.h"
 #include "chunk_gated_delta_rule_fwd_h_tiling_data.h"
 #include "chunk_gated_delta_rule_fwd_h_tiling_key.h"
 
@@ -16,26 +15,9 @@ namespace NsChunkGatedDeltaRuleFwdH {
 
 using namespace AscendC;
 
-// Cross-core event IDs used to hand AIV-produced matmul inputs to the AIC
-// on Ascend 910B. IDs 0-3 are reserved by the two Matmul KFC instances and
-// 11-14 by the framework's superkernel sync; 4/5 are free for AIV -> AIC.
-constexpr uint16_t kMm1InputsReadyEvent = 4;
-constexpr uint16_t kMm2InputsReadyEvent = 5;
-
-using Mm1AType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
-using Mm1BType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
-using Mm1CType = MatmulType<TPosition::GM, CubeFormat::ND, bfloat16_t>;
-using Mm2AType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t, true>;
-using Mm2BType = MatmulType<TPosition::VECCALC, CubeFormat::ND, bfloat16_t>;
-using Mm2CType = MatmulType<TPosition::GM, CubeFormat::ND, bfloat16_t>;
-using BiasType = MatmulType<TPosition::GM, CubeFormat::ND, float>;
-
 template <typename T>
 class ChunkGatedDeltaRuleFwdH {
 public:
-    matmul::Matmul<Mm1AType, Mm1BType, Mm1CType, BiasType> mm1;
-    matmul::Matmul<Mm2AType, Mm2BType, Mm2CType, BiasType> mm2;
-
     __aicore__ inline ChunkGatedDeltaRuleFwdH() = default;
     __aicore__ inline void Init(
         GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR initialState,
@@ -74,6 +56,14 @@ private:
     __aicore__ inline void MergeDelta(
         const LocalTensor<T>& state, const LocalTensor<T>& delta,
         const LocalTensor<half>& halfWork, const LocalTensor<float>& calcWork);
+    __aicore__ inline void MatmulWStateP4(
+        LocalTensor<T>& w, LocalTensor<T>& state,
+        LocalTensor<T>& out, LocalTensor<float>& scratch,
+        int64_t actualLen);
+    __aicore__ inline void MatmulKtVDecaySeq(
+        LocalTensor<T>& kt, LocalTensor<T>& vDecay,
+        LocalTensor<T>& out, LocalTensor<float>& scratch,
+        int64_t actualLen);
     __aicore__ inline void ProcessTask(int64_t taskId);
 
 private:
@@ -87,8 +77,6 @@ private:
     GlobalTensor<T> hGm_;
     GlobalTensor<T> vGm_;
     GlobalTensor<T> finalStateGm_;
-    GlobalTensor<T> mm1ResultGm_;
-    GlobalTensor<T> mm2ResultGm_;
 
     TBuf<TPosition::VECCALC> stateBuf_;
     TBuf<TPosition::VECCALC> chunkBuf_;
@@ -137,21 +125,12 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::Init(
         finalStateGm_.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(finalState));
     }
 
-    __gm__ uint8_t* coreWorkspace = GetUserWorkspace(workspace) +
-        blockIdx_ * tiling_->perCoreWorkspaceBytes;
-    mm1ResultGm_.SetGlobalBuffer(
-        reinterpret_cast<__gm__ T*>(coreWorkspace + tiling_->mm1WorkspaceOffset),
-        stageElements_);
-    mm2ResultGm_.SetGlobalBuffer(
-        reinterpret_cast<__gm__ T*>(coreWorkspace + tiling_->mm2WorkspaceOffset),
-        stateElements_);
-
     if ASCEND_IS_AIV {
         pipe->InitBuffer(stateBuf_, stateElements_ * sizeof(T));
         pipe->InitBuffer(chunkBuf_, chunkElements_ * sizeof(T));
         pipe->InitBuffer(stageBuf_, stageElements_ * sizeof(T));
         pipe->InitBuffer(halfWorkBuf_, halfWorkElements_ * sizeof(half));
-        pipe->InitBuffer(calcWorkBuf_, 2 * tiling_->vTileSize * sizeof(float));
+        pipe->InitBuffer(calcWorkBuf_, 8 * tiling_->vTileSize * sizeof(float));
     }
 }
 
@@ -284,6 +263,96 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MergeDelta(
             Cast(deltaFloat, delta[row * tile], RoundMode::CAST_NONE, tile);
             Add(stateFloat, stateFloat, deltaFloat, tile);
             Cast(state[row * tile], stateFloat, RoundMode::CAST_RINT, tile);
+        }
+    }
+}
+
+template <typename T>
+__aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulWStateP4(
+    LocalTensor<T>& w, LocalTensor<T>& state,
+    LocalTensor<T>& out, LocalTensor<float>& scratch,
+    int64_t actualLen)
+{
+    if ASCEND_IS_AIV {
+        const int64_t tile = tiling_->vTileSize;
+        const int64_t kDim = tiling_->keyDim;
+        LocalTensor<float> acc0 = scratch;
+        LocalTensor<float> acc1 = scratch[tile];
+        LocalTensor<float> acc2 = scratch[2 * tile];
+        LocalTensor<float> acc3 = scratch[3 * tile];
+        LocalTensor<float> prod = scratch[4 * tile];
+        LocalTensor<float> tmp1 = scratch[5 * tile];
+        LocalTensor<float> tmp2 = scratch[6 * tile];
+        LocalTensor<float> rowF = scratch[7 * tile];
+
+        for (int64_t m = 0; m < actualLen; ++m) {
+            Duplicate(acc0, 0.0f, tile);
+            Duplicate(acc1, 0.0f, tile);
+            Duplicate(acc2, 0.0f, tile);
+            Duplicate(acc3, 0.0f, tile);
+
+            int64_t k = 0;
+            for (; k + 4 <= kDim; k += 4) {
+                Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k)), tile);
+                Add(acc0, acc0, prod, tile);
+
+                Cast(rowF, state[(k + 1) * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 1)), tile);
+                Add(acc1, acc1, prod, tile);
+
+                Cast(rowF, state[(k + 2) * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 2)), tile);
+                Add(acc2, acc2, prod, tile);
+
+                Cast(rowF, state[(k + 3) * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k + 3)), tile);
+                Add(acc3, acc3, prod, tile);
+            }
+            for (; k < kDim; ++k) {
+                Cast(rowF, state[k * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(w.GetValue(m * kDim + k)), tile);
+                const int64_t lane = k & 3;
+                if (lane == 0) {
+                    Add(acc0, acc0, prod, tile);
+                } else if (lane == 1) {
+                    Add(acc1, acc1, prod, tile);
+                } else if (lane == 2) {
+                    Add(acc2, acc2, prod, tile);
+                } else {
+                    Add(acc3, acc3, prod, tile);
+                }
+            }
+
+            Add(tmp1, acc0, acc1, tile);
+            Add(tmp2, acc2, acc3, tile);
+            Add(tmp1, tmp1, tmp2, tile);
+            Cast(out[m * tile], tmp1, RoundMode::CAST_RINT, tile);
+        }
+    }
+}
+
+template <typename T>
+__aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::MatmulKtVDecaySeq(
+    LocalTensor<T>& kt, LocalTensor<T>& vDecay,
+    LocalTensor<T>& out, LocalTensor<float>& scratch,
+    int64_t actualLen)
+{
+    if ASCEND_IS_AIV {
+        const int64_t tile = tiling_->vTileSize;
+        const int64_t kDim = tiling_->keyDim;
+        LocalTensor<float> accN = scratch;
+        LocalTensor<float> prod = scratch[tile];
+        LocalTensor<float> rowF = scratch[2 * tile];
+
+        for (int64_t m = 0; m < kDim; ++m) {
+            Duplicate(accN, 0.0f, tile);
+            for (int64_t t = 0; t < actualLen; ++t) {
+                Cast(rowF, vDecay[t * tile], RoundMode::CAST_NONE, tile);
+                Muls(prod, rowF, static_cast<float>(kt.GetValue(t * kDim + m)), tile);
+                Add(accN, accN, prod, tile);
+            }
+            Cast(out[m * tile], accN, RoundMode::CAST_RINT, tile);
         }
     }
 }
@@ -430,12 +499,15 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
     LocalTensor<T> state;
     LocalTensor<T> chunkLocal;
     LocalTensor<T> stage;
+    LocalTensor<T> deltaBf16;
     LocalTensor<half> halfWork;
     LocalTensor<float> calcWork;
     if ASCEND_IS_AIV {
         state = stateBuf_.Get<T>();
         chunkLocal = chunkBuf_.Get<T>();
         stage = stageBuf_.Get<T>();
+        LocalTensor<half> halfHandle = halfWorkBuf_.Get<half>();
+        deltaBf16 = halfHandle.ReinterpretCast<T>();
         halfWork = halfWorkBuf_.Get<half>();
         calcWork = calcWorkBuf_.Get<float>();
     }
@@ -453,51 +525,13 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
         StoreState(hGm_, hBase, task, state);
 
         PackW(task, tokenStart, actualLen, chunkLocal);
-        // MM1 reads chunkLocal/state from UB; both are produced by the AIV.
-        // Notify the AIC only after all AIV writes are visible.
-        if ASCEND_IS_AIV {
-            PipeBarrier<PIPE_ALL>();
-            NotifyEvent<PIPE_MTE3>(kMm1InputsReadyEvent);
-        }
-        if ASCEND_IS_AIC {
-            WaitEvent(kMm1InputsReadyEvent);
-        }
-        mm1.SetTensorA(chunkLocal);
-        mm1.SetTensorB(state);
-        mm1.template IterateAll<true>(mm1ResultGm_);
-        mm1.End();
-
-        if ASCEND_IS_AIV {
-            DataCopy(stage, mm1ResultGm_, stageElements_);
-            event_t mm1Ready = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-            SetFlag<HardEvent::MTE2_V>(mm1Ready);
-            WaitFlag<HardEvent::MTE2_V>(mm1Ready);
-        }
+        MatmulWStateP4(chunkLocal, state, stage, calcWork, actualLen);
         ComputeValueAndDecay(
             task, tokenStart, actualLen, stage, halfWork, calcWork, chunkLocal);
 
         PackK(task, tokenStart, actualLen, chunkLocal);
-        // MM2 reads chunkLocal/stage from UB; both are produced by the AIV.
-        // Notify the AIC only after all AIV writes are visible.
-        if ASCEND_IS_AIV {
-            PipeBarrier<PIPE_ALL>();
-            NotifyEvent<PIPE_MTE3>(kMm2InputsReadyEvent);
-        }
-        if ASCEND_IS_AIC {
-            WaitEvent(kMm2InputsReadyEvent);
-        }
-        mm2.SetTensorA(chunkLocal, true);
-        mm2.SetTensorB(stage);
-        mm2.template IterateAll<true>(mm2ResultGm_);
-        mm2.End();
-
-        if ASCEND_IS_AIV {
-            DataCopy(chunkLocal, mm2ResultGm_, stateElements_);
-            event_t mm2Ready = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-            SetFlag<HardEvent::MTE2_V>(mm2Ready);
-            WaitFlag<HardEvent::MTE2_V>(mm2Ready);
-        }
-        MergeDelta(state, chunkLocal, halfWork, calcWork);
+        MatmulKtVDecaySeq(chunkLocal, stage, deltaBf16, calcWork, actualLen);
+        MergeDelta(state, deltaBf16, halfWork, calcWork);
     }
 
     if (tiling_->storeFinalState != 0) {

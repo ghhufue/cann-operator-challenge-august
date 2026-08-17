@@ -15,10 +15,6 @@ __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM_ADDR w, GM
 
     AscendC::TPipe pipe;
     NsChunkGatedDeltaRuleFwdH::ChunkGatedDeltaRuleFwdH<bfloat16_t> op;
-    const TCubeTiling* mm1Tiling = &tilingData.mm1Tiling;
-    const TCubeTiling* mm2Tiling = &tilingData.mm2Tiling;
-    REGIST_MATMUL_OBJ(
-        &pipe, GetSysWorkSpacePtr(), op.mm1, mm1Tiling, op.mm2, mm2Tiling);
     op.Init(k, w, u, g, initial_state, cu_seqlens, chunk_indices,
             h, v, final_state, workspace, &tilingData, &pipe);
     op.Process();
