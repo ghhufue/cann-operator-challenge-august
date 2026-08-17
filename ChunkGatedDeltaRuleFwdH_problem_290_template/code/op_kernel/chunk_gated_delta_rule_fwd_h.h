@@ -111,6 +111,7 @@ private:
     int64_t chunkElements_ = 0;
     int64_t stageElements_ = 0;
     int64_t halfWorkElements_ = 0;
+    __gm__ uint8_t* debugBase_ = nullptr;
 };
 
 template <typename T>
@@ -156,35 +157,8 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::Init(
         stateElements_);
 
     if (tiling_->debugWorkspaceBytes > 0) {
-        __gm__ uint8_t* debugBase = reinterpret_cast<__gm__ uint8_t*>(workspace) +
+        debugBase_ = reinterpret_cast<__gm__ uint8_t*>(workspace) +
             tiling_->debugWorkspaceOffset;
-        int64_t debugPos = 0;
-        debugWsGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stageElements_);
-        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugVNewGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ half*>(debugBase + debugPos), stageElements_);
-        debugPos = (debugPos + stageElements_ * sizeof(half) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugGateGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ half*>(debugBase + debugPos), tiling_->chunkSize);
-        debugPos = (debugPos + tiling_->chunkSize * sizeof(half) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugVDecayGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stageElements_);
-        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugHDecayGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
-        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugMm2Gm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
-        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
-            kDebugAlignment * kDebugAlignment;
-        debugNextHGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(debugBase + debugPos), stateElements_);
     }
 
     if ASCEND_IS_AIV {
@@ -481,6 +455,38 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
     int64_t chunkNum = 0;
     GetSequenceRange(task.sequence, bos, eos, chunkOffset, chunkNum);
 
+    if ASCEND_IS_AIV && tiling_->debugPerTaskBytes > 0 {
+        __gm__ uint8_t* taskDebugBase = debugBase_ +
+            taskId * tiling_->debugPerTaskBytes;
+        int64_t debugPos = 0;
+        debugWsGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugVNewGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ half*>(taskDebugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(half) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugGateGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ half*>(taskDebugBase + debugPos), tiling_->chunkSize);
+        debugPos = (debugPos + tiling_->chunkSize * sizeof(half) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugVDecayGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stageElements_);
+        debugPos = (debugPos + stageElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugHDecayGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
+        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugMm2Gm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
+        debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
+            kDebugAlignment * kDebugAlignment;
+        debugNextHGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
+    }
+
     LocalTensor<T> state;
     LocalTensor<T> chunkLocal;
     LocalTensor<T> stage;
@@ -502,7 +508,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
         const int64_t actualLen = remaining < tiling_->chunkSize ? remaining : tiling_->chunkSize;
         bool dump = false;
         if ASCEND_IS_AIV {
-            dump = blockIdx_ == 0 && taskId == 0 && chunk == 0;
+            dump = chunk == 0;
         }
 
         const int64_t hBase =

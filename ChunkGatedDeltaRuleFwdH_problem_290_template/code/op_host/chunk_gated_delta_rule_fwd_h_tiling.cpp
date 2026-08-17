@@ -159,8 +159,9 @@ ge::graphStatus SetWorkspace(
     tiling.perCoreWorkspaceBytes =
         AlignUp(tiling.mm2WorkspaceOffset + mm2Bytes, WORKSPACE_ALIGNMENT);
     tiling.systemWorkspaceBytes = static_cast<int64_t>(resources.systemWorkspaceBytes);
-    tiling.debugWorkspaceBytes =
+    tiling.debugPerTaskBytes =
         ComputeDebugWorkspaceBytes(tiling.chunkSize, tiling.vTileSize, tiling.keyDim);
+    tiling.debugWorkspaceBytes = tiling.debugPerTaskBytes * tiling.taskCount;
 
     size_t* workspace = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspace);

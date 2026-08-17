@@ -39,6 +39,7 @@ struct ChunkGatedDeltaRuleFwdHTilingData {
     int64_t mm2WorkspaceOffset = 0;
     int64_t debugWorkspaceOffset = 0;
     int64_t debugWorkspaceBytes = 0;
+    int64_t debugPerTaskBytes = 0;
 
     TCubeTiling mm1Tiling;  // [64, K] @ [K, vTile]
     TCubeTiling mm2Tiling;  // [K, 64] @ [64, vTile]

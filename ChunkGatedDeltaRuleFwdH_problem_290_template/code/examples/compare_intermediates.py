@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compare one-chunk intermediate values dumped into the NPU workspace.
 
-The kernel writes the following fields for task 0, chunk 0, v-tile 0 into the
-tail of the workspace:
+The kernel writes the following fields for every task at chunk 0 into a
+per-task slot at the tail of the workspace:
 
   0: ws bf16           [actual_len, tile]
   1: v_new fp16        [actual_len, tile]
@@ -12,8 +12,8 @@ tail of the workspace:
   5: mm2 bf16          [key_dim, tile]
   6: next_h bf16       [key_dim, tile]
 
-This script recomputes the same values with the Python reference formulas and
-compares raw 16-bit storage.
+This script recomputes the same values for one task with the Python reference
+formulas and compares raw 16-bit storage.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -80,7 +79,7 @@ def cast_to_float16(value: torch.Tensor) -> torch.Tensor:
     return torch.where(is_special, value_f16, clamped)
 
 
-def torch_bits(value: torch.Tensor, dtype) -> np.ndarray:
+def torch_bits(value: torch.Tensor, dtype: str) -> np.ndarray:
     if dtype == "bfloat16":
         arr = np.asarray(value.to(torch.float32).numpy(), dtype=np.float32).astype(bfloat16)
         return arr.view(np.uint16).reshape(value.shape)
@@ -95,11 +94,7 @@ def read_bits(data: bytes, offset: int, elements: int, shape: tuple[int, ...]) -
     return bits.reshape(shape)
 
 
-def compare_field(
-    name: str,
-    actual_bits: np.ndarray,
-    golden_bits: np.ndarray,
-) -> bool:
+def compare_field(name: str, actual_bits: np.ndarray, golden_bits: np.ndarray) -> bool:
     mismatches = int(np.count_nonzero(actual_bits != golden_bits))
     total = actual_bits.size
     passed = mismatches == 0
@@ -119,18 +114,32 @@ def compare_field(
     return passed
 
 
-def run_case(case_dir: Path) -> int:
+def run_case(case_dir: Path, task_id: int) -> int:
     manifest = json.loads((case_dir / "manifest.json").read_text(encoding="utf-8"))
-    total_tokens = int(manifest["total_tokens"])
     value_heads = int(manifest["tensors"]["input_w"]["shape"][1])
     key_heads = int(manifest["tensors"]["input_k"]["shape"][2])
     key_dim = int(manifest["tensors"]["input_k"]["shape"][3])
     value_dim = int(manifest["tensors"]["input_u"]["shape"][3])
     tile = min(64, value_dim)
+    v_tile_count = (value_dim + tile - 1) // tile
 
     cu_seqlens = load_manifest_tensor(manifest, "input_cu_seqlens", case_dir)
-    first_seq_len = int(cu_seqlens[1].item() - cu_seqlens[0].item())
-    actual_len = min(CHUNK_SIZE, first_seq_len)
+    sequence_count = int(cu_seqlens.numel() - 1)
+    task_count = sequence_count * value_heads * v_tile_count
+    if task_id < 0 or task_id >= task_count:
+        print(
+            f"task_id {task_id} out of range; valid range is [0, {task_count - 1}]"
+        )
+        return 2
+
+    v_tile = task_id % v_tile_count
+    sequence_and_head = task_id // v_tile_count
+    head = sequence_and_head % value_heads
+    sequence = sequence_and_head // value_heads
+    v_start = v_tile * tile
+    bos = int(cu_seqlens[sequence].item())
+    eos = int(cu_seqlens[sequence + 1].item())
+    actual_len = min(CHUNK_SIZE, eos - bos)
 
     k = load_manifest_tensor(manifest, "input_k", case_dir)
     w = load_manifest_tensor(manifest, "input_w", case_dir)
@@ -138,18 +147,19 @@ def run_case(case_dir: Path) -> int:
     g = load_manifest_tensor(manifest, "input_g", case_dir)
 
     head_ratio = value_heads // key_heads
+    key_head = head // head_ratio
     k_by_head = k.transpose(1, 2).contiguous()
 
     if "input_initial_state" in manifest["tensors"]:
         initial_state = load_manifest_tensor(manifest, "input_initial_state", case_dir)
-        state = initial_state[0, 0].to(torch.float32).to(k.dtype)
+        state = initial_state[sequence, head].to(torch.float32).to(k.dtype)
     else:
         state = torch.zeros((key_dim, value_dim), dtype=k.dtype)
 
-    w_sel = w[0, 0, 0:actual_len, :]
-    u_sel = u[0, 0, 0:actual_len, :]
-    g_sel = g[0, 0, 0:actual_len]
-    k_sel = k_by_head[0, 0, 0:actual_len, :]
+    w_sel = w[0, head, bos:bos + actual_len, :]
+    u_sel = u[0, head, bos:bos + actual_len, :]
+    g_sel = g[0, head, bos:bos + actual_len]
+    k_sel = k_by_head[0, key_head, bos:bos + actual_len, :]
 
     ws = w_sel @ state
     ws_fp16 = torch.nan_to_num(
@@ -178,13 +188,19 @@ def run_case(case_dir: Path) -> int:
     ).to(k.dtype)
 
     fields = [
-        ("ws", "bfloat16", actual_len * tile, (actual_len, tile), torch_bits(ws[:, :tile], "bfloat16")),
-        ("v_new", "float16", actual_len * tile, (actual_len, tile), torch_bits(v_new_fp16[:, :tile], "float16")),
+        ("ws", "bfloat16", actual_len * tile, (actual_len, tile),
+         torch_bits(ws[:, v_start:v_start + tile], "bfloat16")),
+        ("v_new", "float16", actual_len * tile, (actual_len, tile),
+         torch_bits(v_new_fp16[:, v_start:v_start + tile], "float16")),
         ("gate", "float16", actual_len, (actual_len,), torch_bits(gate, "float16")),
-        ("v_decay", "bfloat16", actual_len * tile, (actual_len, tile), torch_bits(v_decay_bf16[:, :tile], "bfloat16")),
-        ("h_decay", "bfloat16", key_dim * tile, (key_dim, tile), torch_bits(h_decay_fp16.to(torch.bfloat16)[:, :tile], "bfloat16")),
-        ("mm2", "bfloat16", key_dim * tile, (key_dim, tile), torch_bits(update[:, :tile], "bfloat16")),
-        ("next_h", "bfloat16", key_dim * tile, (key_dim, tile), torch_bits(next_state[:, :tile], "bfloat16")),
+        ("v_decay", "bfloat16", actual_len * tile, (actual_len, tile),
+         torch_bits(v_decay_bf16[:, v_start:v_start + tile], "bfloat16")),
+        ("h_decay", "bfloat16", key_dim * tile, (key_dim, tile),
+         torch_bits(h_decay_fp16.to(torch.bfloat16)[:, v_start:v_start + tile], "bfloat16")),
+        ("mm2", "bfloat16", key_dim * tile, (key_dim, tile),
+         torch_bits(update[:, v_start:v_start + tile], "bfloat16")),
+        ("next_h", "bfloat16", key_dim * tile, (key_dim, tile),
+         torch_bits(next_state[:, v_start:v_start + tile], "bfloat16")),
     ]
 
     workspace_path = case_dir / "actual_workspace.bin"
@@ -193,7 +209,8 @@ def run_case(case_dir: Path) -> int:
         return 2
 
     data = workspace_path.read_bytes()
-    offsets, debug_bytes = debug_layout(CHUNK_SIZE, key_dim)
+    offsets, per_task_bytes = debug_layout(CHUNK_SIZE, key_dim)
+    debug_bytes = per_task_bytes * task_count
     if len(data) < debug_bytes:
         print(
             f"Workspace dump is shorter than debug region: {len(data)} < {debug_bytes}"
@@ -201,9 +218,16 @@ def run_case(case_dir: Path) -> int:
         return 2
     debug = data[-debug_bytes:]
 
+    print(
+        f"Task {task_id}: sequence={sequence}, value_head={head}, "
+        f"v_tile={v_tile}, v_start={v_start}, actual_len={actual_len}, "
+        f"tile={tile}, task_count={task_count}"
+    )
+
     all_passed = True
+    slot_start = task_id * per_task_bytes
     for idx, (field, _dtype, elements, shape, golden_bits) in enumerate(fields):
-        actual_bits = read_bits(debug, offsets[idx], elements, shape)
+        actual_bits = read_bits(debug, slot_start + offsets[idx], elements, shape)
         all_passed &= compare_field(field, actual_bits, golden_bits)
 
     return 0 if all_passed else 1
@@ -212,13 +236,19 @@ def run_case(case_dir: Path) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case_dir", type=Path, help="generated Golden case directory")
+    parser.add_argument(
+        "--task-id",
+        type=int,
+        default=0,
+        help="logical task id: task_id = (sequence * HV + value_head) * v_tiles + v_tile",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        return run_case(args.case_dir.resolve())
+        return run_case(args.case_dir.resolve(), args.task_id)
     except (OSError, KeyError, TypeError, ValueError) as error:
         print(f"Intermediate comparison failed: {error}")
         return 2
