@@ -455,9 +455,10 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
     int64_t chunkNum = 0;
     GetSequenceRange(task.sequence, bos, eos, chunkOffset, chunkNum);
 
-    if ASCEND_IS_AIV && tiling_->debugPerTaskBytes > 0 {
-        __gm__ uint8_t* taskDebugBase = debugBase_ +
-            taskId * tiling_->debugPerTaskBytes;
+    if ASCEND_IS_AIV {
+        if (tiling_->debugPerTaskBytes > 0) {
+            __gm__ uint8_t* taskDebugBase = debugBase_ +
+                taskId * tiling_->debugPerTaskBytes;
         int64_t debugPos = 0;
         debugWsGm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stageElements_);
@@ -483,8 +484,9 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
         debugPos = (debugPos + stateElements_ * sizeof(T) + kDebugAlignment - 1) /
             kDebugAlignment * kDebugAlignment;
-        debugNextHGm_.SetGlobalBuffer(
-            reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
+            debugNextHGm_.SetGlobalBuffer(
+                reinterpret_cast<__gm__ T*>(taskDebugBase + debugPos), stateElements_);
+        }
     }
 
     LocalTensor<T> state;
