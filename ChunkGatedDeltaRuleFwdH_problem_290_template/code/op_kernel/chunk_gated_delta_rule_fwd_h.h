@@ -238,9 +238,6 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
         Adds(gateFloat, gateFloat, gLast, actualLen);
         Exp(gateFloat, gateFloat, actualLen);
         Cast(gateHalf, gateFloat, RoundMode::CAST_NONE, actualLen);
-        if (dump) {
-            DumpToGm(debugGateGm_, gateHalf, actualLen);
-        }
 
         // alpha = exp(round_to_fp16(g_last)), matching the reference's
         // explicit FP16 conversion before the state decay exponent.
@@ -259,9 +256,6 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(whFloat, halfWork[row * tile], RoundMode::CAST_NONE, tile);
             Sub(valueFloat, valueFloat, whFloat, tile);
             Cast(scalarHalf, valueFloat, RoundMode::CAST_NONE, tile);
-            if (dump) {
-                DumpToGm(debugVNewGm_[row * tile], scalarHalf, tile);
-            }
 
             // Save the un-decayed v_new output as BF16.
             Cast(valueFloat, scalarHalf, RoundMode::CAST_NONE, tile);

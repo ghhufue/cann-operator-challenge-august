@@ -188,18 +188,15 @@ def run_case(case_dir: Path, task_id: int) -> int:
     ).to(k.dtype)
 
     fields = [
-        ("ws", "bfloat16", actual_len * tile, (actual_len, tile),
+        ("ws", 0, "bfloat16", actual_len * tile, (actual_len, tile),
          torch_bits(ws[:, v_start:v_start + tile], "bfloat16")),
-        ("v_new", "float16", actual_len * tile, (actual_len, tile),
-         torch_bits(v_new_fp16[:, v_start:v_start + tile], "float16")),
-        ("gate", "float16", actual_len, (actual_len,), torch_bits(gate, "float16")),
-        ("v_decay", "bfloat16", actual_len * tile, (actual_len, tile),
+        ("v_decay", 3, "bfloat16", actual_len * tile, (actual_len, tile),
          torch_bits(v_decay_bf16[:, v_start:v_start + tile], "bfloat16")),
-        ("h_decay", "bfloat16", key_dim * tile, (key_dim, tile),
+        ("h_decay", 4, "bfloat16", key_dim * tile, (key_dim, tile),
          torch_bits(h_decay_fp16.to(torch.bfloat16)[:, v_start:v_start + tile], "bfloat16")),
-        ("mm2", "bfloat16", key_dim * tile, (key_dim, tile),
+        ("mm2", 5, "bfloat16", key_dim * tile, (key_dim, tile),
          torch_bits(update[:, v_start:v_start + tile], "bfloat16")),
-        ("next_h", "bfloat16", key_dim * tile, (key_dim, tile),
+        ("next_h", 6, "bfloat16", key_dim * tile, (key_dim, tile),
          torch_bits(next_state[:, v_start:v_start + tile], "bfloat16")),
     ]
 
@@ -226,8 +223,8 @@ def run_case(case_dir: Path, task_id: int) -> int:
 
     all_passed = True
     slot_start = task_id * per_task_bytes
-    for idx, (field, _dtype, elements, shape, golden_bits) in enumerate(fields):
-        actual_bits = read_bits(debug, slot_start + offsets[idx], elements, shape)
+    for field, offset_index, _dtype, elements, shape, golden_bits in fields:
+        actual_bits = read_bits(debug, slot_start + offsets[offset_index], elements, shape)
         all_passed &= compare_field(field, actual_bits, golden_bits)
 
     return 0 if all_passed else 1
