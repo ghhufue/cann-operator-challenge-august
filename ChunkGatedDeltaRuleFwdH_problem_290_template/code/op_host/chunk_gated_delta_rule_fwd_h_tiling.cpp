@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include "register/op_def_registry.h"
 #include "op_common/log/log.h"
@@ -173,6 +174,18 @@ ge::graphStatus SetWorkspace(
         WORKSPACE_ALIGNMENT);
     workspace[0] = static_cast<uint64_t>(tiling.debugWorkspaceOffset) +
         static_cast<uint64_t>(tiling.debugWorkspaceBytes);
+
+    printf(
+        "[DEBUG] system=%llu user=%llu perCore=%lld taskCount=%lld "
+        "debugPerTask=%lld debugBytes=%lld debugOffset=%lld workspace=%llu\n",
+        static_cast<unsigned long long>(resources.systemWorkspaceBytes),
+        static_cast<unsigned long long>(userWorkspace),
+        static_cast<long long>(tiling.perCoreWorkspaceBytes),
+        static_cast<long long>(tiling.taskCount),
+        static_cast<long long>(tiling.debugPerTaskBytes),
+        static_cast<long long>(tiling.debugWorkspaceBytes),
+        static_cast<long long>(tiling.debugWorkspaceOffset),
+        static_cast<unsigned long long>(workspace[0]));
     return ge::GRAPH_SUCCESS;
 }
 

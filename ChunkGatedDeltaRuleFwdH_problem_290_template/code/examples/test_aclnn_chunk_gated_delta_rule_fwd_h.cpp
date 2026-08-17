@@ -315,6 +315,7 @@ int RunCase(const fs::path& caseDir, int32_t deviceId)
 
     void* workspace = nullptr;
     if (workspaceSize != 0) {
+        std::cout << "workspaceSize=" << workspaceSize << std::endl;
         CheckAcl(
             aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST),
             "aclrtMalloc workspace");
