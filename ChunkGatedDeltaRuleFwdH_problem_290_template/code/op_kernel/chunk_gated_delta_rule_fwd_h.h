@@ -81,7 +81,9 @@ private:
             event_t vectorToMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(vectorToMte3);
             WaitFlag<HardEvent::V_MTE3>(vectorToMte3);
-            DataCopy(dst, src, count);
+            DataCopyExtParams copy{1, static_cast<uint32_t>(count * sizeof(DstT)), 0, 0, 0};
+            DataCopyPadExtParams<DstT> pad{false, 0, 0, static_cast<DstT>(0)};
+            DataCopyPad(dst, src, copy, pad);
             event_t mte3ToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
             SetFlag<HardEvent::MTE3_V>(mte3ToV);
             WaitFlag<HardEvent::MTE3_V>(mte3ToV);
