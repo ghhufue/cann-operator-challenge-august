@@ -73,6 +73,20 @@ private:
         const LocalTensor<T>& stage, const LocalTensor<half>& halfWork,
         const LocalTensor<float>& calcWork, const LocalTensor<T>& chunkStorage,
         bool dump);
+    template <typename DstT, typename SrcT>
+    __aicore__ inline void DumpToGm(
+        const GlobalTensor<DstT>& dst, const LocalTensor<SrcT>& src, int64_t count)
+    {
+        if ASCEND_IS_AIV {
+            event_t vectorToMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(vectorToMte3);
+            WaitFlag<HardEvent::V_MTE3>(vectorToMte3);
+            DataCopy(dst, src, count);
+            event_t mte3ToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+            SetFlag<HardEvent::MTE3_V>(mte3ToV);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToV);
+        }
+    }
     __aicore__ inline void MergeDelta(
         const LocalTensor<T>& state, const LocalTensor<T>& delta,
         const LocalTensor<half>& halfWork, const LocalTensor<float>& calcWork);
@@ -224,7 +238,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
         Exp(gateFloat, gateFloat, actualLen);
         Cast(gateHalf, gateFloat, RoundMode::CAST_NONE, actualLen);
         if (dump) {
-            DataCopy(debugGateGm_, gateHalf, actualLen);
+            DumpToGm(debugGateGm_, gateHalf, actualLen);
         }
 
         // alpha = exp(round_to_fp16(g_last)), matching the reference's
@@ -245,7 +259,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Sub(valueFloat, valueFloat, whFloat, tile);
             Cast(scalarHalf, valueFloat, RoundMode::CAST_NONE, tile);
             if (dump) {
-                DataCopy(debugVNewGm_[row * tile], scalarHalf, tile);
+                DumpToGm(debugVNewGm_[row * tile], scalarHalf, tile);
             }
 
             // Save the un-decayed v_new output as BF16.
@@ -271,7 +285,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(stage[row * tile], valueFloat, RoundMode::CAST_RINT, tile);
         }
         if (dump) {
-            DataCopy(debugVDecayGm_, stage, actualLen * tile);
+            DumpToGm(debugVDecayGm_, stage, actualLen * tile);
         }
         if (actualLen < tiling_->chunkSize) {
             Duplicate(stage[actualLen * tile], static_cast<T>(0),
@@ -289,7 +303,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ComputeValueAndDecay(
             Cast(stateBuf_.Get<T>()[row * tile], whFloat, RoundMode::CAST_RINT, tile);
         }
         if (dump) {
-            DataCopy(debugHDecayGm_, stateBuf_.Get<T>(), stateElements_);
+            DumpToGm(debugHDecayGm_, stateBuf_.Get<T>(), stateElements_);
         }
     }
 }
@@ -539,7 +553,7 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             SetFlag<HardEvent::MTE2_V>(mm1Ready);
             WaitFlag<HardEvent::MTE2_V>(mm1Ready);
             if (dump) {
-                DataCopy(debugWsGm_, stage, actualLen * tiling_->vTileSize);
+                DumpToGm(debugWsGm_, stage, actualLen * tiling_->vTileSize);
             }
         }
         ComputeValueAndDecay(
@@ -566,12 +580,12 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdH<T>::ProcessTask(int64_t taskId)
             SetFlag<HardEvent::MTE2_V>(mm2Ready);
             WaitFlag<HardEvent::MTE2_V>(mm2Ready);
             if (dump) {
-                DataCopy(debugMm2Gm_, chunkLocal, stateElements_);
+                DumpToGm(debugMm2Gm_, chunkLocal, stateElements_);
             }
         }
         MergeDelta(state, chunkLocal, halfWork, calcWork);
         if (dump) {
-            DataCopy(debugNextHGm_, state, stateElements_);
+            DumpToGm(debugNextHGm_, state, stateElements_);
         }
     }
 
